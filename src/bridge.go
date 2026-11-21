@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -178,7 +179,7 @@ func topicsFor(c config, did string) topics {
 }
 
 // discovery returns retained config messages; an empty payload removes an entity.
-func discovery(t topics, caps capabilities, version string) map[string]string {
+func discovery(t topics, caps capabilities, version string, parts []string) map[string]string {
 	id := caps.Identity
 	model := id["model"]
 	device := map[string]any{"identifiers": []string{t.node}, "name": "Dreame " + strings.TrimPrefix(model, "dreame.vacuum."),
@@ -203,9 +204,16 @@ func discovery(t topics, caps capabilities, version string) map[string]string {
 			"device_class": "battery", "unit_of_measurement": "%", "state_class": "measurement",
 		}),
 		t.discovery + "/sensor/" + t.node + "/error/config": common(map[string]any{
-			"name": "Error code", "unique_id": t.node + "_error", "state_topic": t.base + "/state", "value_template": "{{ value_json.error }}",
+			"name": "Error", "unique_id": t.node + "_error", "state_topic": t.base + "/state", "value_template": "{{ value_json.error_name or value_json.error }}",
 			"entity_category": "diagnostic", "icon": "mdi:alert-circle-outline",
 		}),
+	}
+	for _, name := range parts {
+		out[t.discovery+"/sensor/"+t.node+"/"+name+"/config"] = common(map[string]any{
+			"name": strings.ReplaceAll(strings.ToUpper(name[:1])+name[1:], "_", " "), "unique_id": t.node + "_" + name,
+			"state_topic": t.base + "/state", "value_template": "{{ value_json.consumables." + name + " }}",
+			"unit_of_measurement": "%", "state_class": "measurement", "icon": "mdi:wrench-clock",
+		})
 	}
 	for _, b := range buttons {
 		topic := t.discovery + "/button/" + t.node + "/" + b.command + "/config"
@@ -219,12 +227,32 @@ func discovery(t topics, caps capabilities, version string) map[string]string {
 }
 
 func statePayload(s map[string]any) string {
-	m := map[string]any{"state": s["activity"], "battery": s["battery"], "error": s["error"], "station": s["station"], "status": s["status_name"]}
+	m := map[string]any{"state": s["activity"], "battery": s["battery"], "error": s["error"], "error_name": s["error_name"], "station": s["station"], "status": s["status_name"]}
+	if parts, ok := s["consumables"].(map[string]any); ok {
+		left := map[string]any{}
+		for name, v := range parts {
+			if c, ok := v.(map[string]any); ok {
+				left[name] = c["left"]
+			}
+		}
+		m["consumables"] = left
+	}
 	if v, ok := s["suction"].(float64); ok && int(v) >= 0 && int(v) < len(fanSpeeds) {
 		m["fan_speed"] = fanSpeeds[int(v)]
 	}
 	b, _ := json.Marshal(m)
 	return string(b)
+}
+
+// consumableNames lists the consumables the agent reports, sorted, as discovery needs them.
+func consumableNames(s map[string]any) []string {
+	parts, _ := s["consumables"].(map[string]any)
+	names := make([]string, 0, len(parts))
+	for name := range parts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // commandFor maps an MQTT message to an agent command.
@@ -324,7 +352,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		return err
 	}
 	defer client.Close()
-	for topic, payload := range discovery(t, caps, version) {
+	for topic, payload := range discovery(t, caps, version, nil) {
 		if err := client.Publish(topic, payload, true); err != nil {
 			return err
 		}
@@ -339,7 +367,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 	defer stop()
 	snaps := make(chan *snapshot)
 	go e.events(sctx, snaps)
-	availability := ""
+	availability, announced := "", ""
 	publishAvailability := func(v string) error {
 		if v == availability {
 			return nil
@@ -359,8 +387,19 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		case s := <-snaps:
 			if s == nil || s.Stale || len(s.State) == 0 {
 				err = publishAvailability("offline")
-			} else if err = client.Publish(t.base+"/state", statePayload(s.State), true); err == nil {
-				err = publishAvailability("online")
+			} else {
+				// Consumables are known only from the state; announce them once they appear.
+				if names := consumableNames(s.State); strings.Join(names, ",") != announced {
+					announced = strings.Join(names, ",")
+					for topic, payload := range discovery(t, caps, version, names) {
+						if err = client.Publish(topic, payload, true); err != nil {
+							return err
+						}
+					}
+				}
+				if err = client.Publish(t.base+"/state", statePayload(s.State), true); err == nil {
+					err = publishAvailability("online")
+				}
 			}
 			if err != nil {
 				return err

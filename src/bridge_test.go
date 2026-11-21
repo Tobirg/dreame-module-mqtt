@@ -222,13 +222,19 @@ func TestBridge(t *testing.T) {
 		t.Fatal(st)
 	}
 
-	agent.events <- `{"stale":false,"state":{"activity":"docked","battery":95,"suction":1,"error":0,"status_name":"charging"}}`
+	agent.events <- `{"stale":false,"state":{"activity":"docked","battery":95,"suction":1,"error":0,"error_name":"no_error","status_name":"charging","consumables":{"main_brush":{"left":52,"hours":158}}}}`
 	waitFor(t, "state", func() bool {
 		v, _ := broker.get("dreame_local/123/state")
 		return strings.Contains(v, `"fan_speed":"standard"`)
 	})
 	if v, _ := broker.get("dreame_local/123/state"); !strings.Contains(v, `"state":"docked"`) || !strings.Contains(v, `"battery":95`) {
 		t.Fatal(v)
+	}
+	if v, _ := broker.get("dreame_local/123/state"); !strings.Contains(v, `"consumables":{"main_brush":52}`) {
+		t.Fatal(v)
+	}
+	if v, _ := broker.get("homeassistant/sensor/dreame_123/main_brush/config"); !strings.Contains(v, `"value_template":"{{ value_json.consumables.main_brush }}"`) || !strings.Contains(v, `"name":"Main brush"`) {
+		t.Fatal("consumable sensor", v)
 	}
 	waitFor(t, "online", func() bool { v, _ := broker.get("dreame_local/123/availability"); return v == "online" })
 	agent.events <- `{"stale":true,"state":{"activity":"docked"}}`

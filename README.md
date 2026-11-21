@@ -18,7 +18,8 @@
 |---|---|
 | Пылесос | старт, пауза, стоп, на базу, найти, мощность (`quiet`, `standard`, `strong`, `turbo`), `vacuum.send_command` |
 | Батарея | заряд, % |
-| Код ошибки | диагностический сенсор |
+| Ошибка | название ошибки (`no_error`, `bin_full`, …) |
+| Расходники | остаток ресурса в % для того, что отдаёт модель (щётки, фильтр, датчики, колёса) |
 | Кнопки станции | выгрузка пыли, мойка салфеток, начать и остановить сушку — только если модель робота их поддерживает |
 
 Уборка комнат из автоматизации:
@@ -38,7 +39,7 @@ data:
 
 База по умолчанию — `dreame_local/<id робота>`:
 
-- `<база>/state` — JSON `{"state", "fan_speed", "battery", "error", "station", "status"}`, retained;
+- `<база>/state` — JSON `{"state", "fan_speed", "battery", "error", "error_name", "station", "status", "consumables"}`, retained;
 - `<база>/availability` — `online`/`offline`: робот на связи, агент отвечает, данные свежие. При потере связи с брокером `offline` публикует сам брокер (last will);
 - `<база>/command` — `start`, `pause`, `stop`, `return_to_base`, `locate`, `empty`, `wash_mop`, `dry_start`, `dry_stop`;
 - `<база>/fan_speed` — скорость из списка выше;
