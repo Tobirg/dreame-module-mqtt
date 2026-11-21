@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -144,6 +145,8 @@ func (e env) events(ctx context.Context, out chan<- *snapshot) {
 
 // ---- Home Assistant mapping
 
+var consumableRe = regexp.MustCompile(`^[a-z_]{1,40}$`)
+
 var fanSpeeds = []string{"quiet", "standard", "strong", "turbo"}
 
 // Station buttons are announced only when the agent says the model has the hardware.
@@ -214,6 +217,11 @@ func discovery(t topics, caps capabilities, version string, parts []string) map[
 			"state_topic": t.base + "/state", "value_template": "{{ value_json.consumables." + name + " }}",
 			"unit_of_measurement": "%", "state_class": "measurement", "icon": "mdi:wrench-clock",
 		})
+		// Pressed after replacing or cleaning the part; the agent refuses parts the robot does not report.
+		out[t.discovery+"/button/"+t.node+"/reset_"+name+"/config"] = common(map[string]any{
+			"name": "Reset " + strings.ReplaceAll(name, "_", " "), "unique_id": t.node + "_reset_" + name,
+			"command_topic": t.base + "/command", "payload_press": "reset_" + name, "entity_category": "config", "icon": "mdi:restore",
+		})
 	}
 	for _, b := range buttons {
 		topic := t.discovery + "/button/" + t.node + "/" + b.command + "/config"
@@ -266,6 +274,9 @@ func commandFor(t topics, msg message) (map[string]any, error) {
 		}
 		if name, ok := names[payload]; ok {
 			return map[string]any{"name": name}, nil
+		}
+		if part, ok := strings.CutPrefix(payload, "reset_"); ok && consumableRe.MatchString(part) {
+			return map[string]any{"name": "reset_consumable", "consumable": part}, nil
 		}
 	case t.base + "/fan_speed":
 		for i, f := range fanSpeeds {

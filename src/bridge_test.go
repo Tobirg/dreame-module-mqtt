@@ -236,6 +236,9 @@ func TestBridge(t *testing.T) {
 	if v, _ := broker.get("homeassistant/sensor/dreame_123/main_brush/config"); !strings.Contains(v, `"value_template":"{{ value_json.consumables.main_brush }}"`) || !strings.Contains(v, `"name":"Main brush"`) {
 		t.Fatal("consumable sensor", v)
 	}
+	if v, _ := broker.get("homeassistant/button/dreame_123/reset_main_brush/config"); !strings.Contains(v, `"payload_press":"reset_main_brush"`) || !strings.Contains(v, `"entity_category":"config"`) {
+		t.Fatal("reset button", v)
+	}
 	waitFor(t, "online", func() bool { v, _ := broker.get("dreame_local/123/availability"); return v == "online" })
 	agent.events <- `{"stale":true,"state":{"activity":"docked"}}`
 	waitFor(t, "offline when stale", func() bool { v, _ := broker.get("dreame_local/123/availability"); return v == "offline" })
@@ -243,6 +246,7 @@ func TestBridge(t *testing.T) {
 	for topic, want := range map[string]string{
 		"dreame_local/123/command\x00return_to_base":                                                    `{"name":"dock"}`,
 		"dreame_local/123/command\x00wash_mop":                                                          `{"name":"wash_mop"}`,
+		"dreame_local/123/command\x00reset_main_brush":                                                  `{"consumable":"main_brush","name":"reset_consumable"}`,
 		"dreame_local/123/fan_speed\x00turbo":                                                           `{"name":"set_suction","value":3}`,
 		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","params":{"rooms":[1,2]}}`: `{"name":"clean_rooms","rooms":[1,2]}`,
 	} {
