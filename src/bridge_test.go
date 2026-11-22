@@ -164,6 +164,9 @@ func newAgent(t *testing.T) *fakeAgent {
 					w.(http.Flusher).Flush()
 				}
 			}
+		case "/api/v1/map.png":
+			w.Header().Set("Content-Type", "image/png")
+			fmt.Fprint(w, "\x89PNG-test")
 		case "/api/v1/command":
 			var v map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&v)
@@ -203,6 +206,10 @@ func TestBridge(t *testing.T) {
 	go func() { e.run(ctx, "test"); close(done) }()
 
 	waitFor(t, "discovery", func() bool { _, ok := broker.get("homeassistant/vacuum/dreame_123/config"); return ok })
+	waitFor(t, "map picture", func() bool { v, _ := broker.get("dreame_local/123/map"); return v == "\x89PNG-test" })
+	if v, _ := broker.get("homeassistant/image/dreame_123/map/config"); !strings.Contains(v, `"image_topic":"dreame_local/123/map"`) {
+		t.Fatal("map image entity", v)
+	}
 	if broker.connects[0] != "ha:secret will=dreame_local/123/availability" {
 		t.Fatal(broker.connects)
 	}

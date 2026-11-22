@@ -86,6 +86,23 @@ func (e env) get(ctx context.Context, path string, v any) error {
 	return json.Unmarshal(body.Result, v)
 }
 
+var mapEvery = 15 * time.Second
+
+// raw returns a non-JSON agent resource such as the map picture.
+func (e env) raw(ctx context.Context, path string) ([]byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", e.api+path, nil)
+	req.Header.Set("Authorization", "Bearer "+e.token)
+	res, err := e.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return nil, fmt.Errorf("agent %s: HTTP %d", path, res.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(res.Body, 4<<20))
+}
+
 func (e env) command(ctx context.Context, cmd map[string]any) error {
 	b, _ := json.Marshal(cmd)
 	req, _ := http.NewRequestWithContext(ctx, "POST", e.api+"/api/v1/command", bytes.NewReader(b))
@@ -209,6 +226,9 @@ func discovery(t topics, caps capabilities, version string, parts []string) map[
 		t.discovery + "/sensor/" + t.node + "/error/config": common(map[string]any{
 			"name": "Error", "unique_id": t.node + "_error", "state_topic": t.base + "/state", "value_template": "{{ value_json.error_name or value_json.error }}",
 			"entity_category": "diagnostic", "icon": "mdi:alert-circle-outline",
+		}),
+		t.discovery + "/image/" + t.node + "/map/config": common(map[string]any{
+			"name": "Map", "unique_id": t.node + "_map", "image_topic": t.base + "/map", "content_type": "image/png",
 		}),
 	}
 	for _, name := range parts {
@@ -388,6 +408,23 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 	}
 	check := time.NewTicker(2 * time.Second)
 	defer check.Stop()
+	// The map picture: the agent renders it, published only when it changed.
+	mapTick := time.NewTicker(mapEvery)
+	defer mapTick.Stop()
+	lastMap := ""
+	publishMap := func() error {
+		mctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		img, err := e.raw(mctx, "/api/v1/map.png")
+		if err != nil || string(img) == lastMap {
+			return nil // no saved map yet, or unchanged
+		}
+		lastMap = string(img)
+		return client.Publish(t.base+"/map", lastMap, true)
+	}
+	if err := publishMap(); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -427,6 +464,10 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			}
 			if err != nil {
 				log.Print(err)
+			}
+		case <-mapTick.C:
+			if err := publishMap(); err != nil {
+				return err
 			}
 		case <-check.C:
 			if _, m := e.loadConfig(); !m.Equal(mtime) {
