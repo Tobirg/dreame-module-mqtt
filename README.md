@@ -55,6 +55,27 @@ params: {setting: child_lock, to: true}
 
 Карточка [xiaomi-vacuum-map-card](https://github.com/PiotrMachowski/lovelace-xiaomi-vacuum-map-card) (ставится через HACS) берёт карту и калибровку у «Камеры карты» и отправляет команды через `vacuum.send_command`. Номера и центры комнат — в атрибуте `rooms` камеры (Инструменты разработчика → Состояния).
 
+Проще всего — платформа **send_command** в редакторе карточки: модуль понимает её стандартные команды (`app_zoned_clean` — уборка зоны, `app_segment_clean` — уборка комнат, `app_goto_target` — уборка квадрата 1,5 × 1,5 м вокруг точки: отдельного «ехать в точку» здесь нет). Мощность — текущая у робота, влажность — средняя. Карта и калибровка:
+
+```yaml
+type: custom:xiaomi-vacuum-map-card
+entity: vacuum.dreame_r2505
+vacuum_platform: send_command
+map_source:
+  camera: camera.dreame_r2505_map_camera
+calibration_source:
+  camera: true
+map_modes:
+  - template: vacuum_clean_zone
+  - template: vacuum_goto
+  - template: vacuum_clean_segment
+    predefined_selections:   # id и центр из атрибута rooms
+      - id: 4
+        label: {text: Коридор, x: -4482, y: 1035}
+```
+
+Свои режимы со своими мощностью и влажностью:
+
 ```yaml
 type: custom:xiaomi-vacuum-map-card
 entity: vacuum.dreame_r2505

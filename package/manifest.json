@@ -1,6 +1,6 @@
 {
   "name": "mqtt",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "title": "MQTT и Home Assistant",
   "description": "Публикует робот в MQTT-брокер с автообнаружением Home Assistant и принимает команды из MQTT.",
   "handler": "mqtt-bridge",
