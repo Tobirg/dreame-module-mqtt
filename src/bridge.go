@@ -174,7 +174,8 @@ func (e env) events(ctx context.Context, out chan<- *snapshot) {
 
 var consumableRe = regexp.MustCompile(`^[a-z_]{1,40}$`)
 
-var fanSpeeds = []string{"quiet", "standard", "strong", "turbo"}
+// Names xiaomi-vacuum-map-card has icons and translations for (the app calls the first one Quiet).
+var fanSpeeds = []string{"Silent", "Standard", "Strong", "Turbo"}
 
 // Station buttons are announced only when the agent says the model has the hardware.
 var buttons = []struct{ command, name, icon string }{
@@ -338,7 +339,7 @@ func commandFor(t topics, msg message, suction int) (map[string]any, error) {
 		}
 	case t.base + "/fan_speed":
 		for i, f := range fanSpeeds {
-			if f == payload {
+			if strings.EqualFold(f, payload) { // older lower-case names keep working
 				return map[string]any{"name": "set_suction", "value": i}, nil
 			}
 		}

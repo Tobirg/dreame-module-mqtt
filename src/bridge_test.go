@@ -261,7 +261,7 @@ func TestBridge(t *testing.T) {
 	agent.events <- `{"stale":false,"state":{"activity":"docked","battery":95,"suction":1,"error":0,"error_name":"no_error","status_name":"charging","consumables":{"main_brush":{"left":52,"hours":158}}}}`
 	waitFor(t, "state", func() bool {
 		v, _ := broker.get("dreame_local/123/state")
-		return strings.Contains(v, `"fan_speed":"standard"`)
+		return strings.Contains(v, `"fan_speed":"Standard"`)
 	})
 	if v, _ := broker.get("dreame_local/123/state"); !strings.Contains(v, `"state":"docked"`) || !strings.Contains(v, `"battery":95`) {
 		t.Fatal(v)
