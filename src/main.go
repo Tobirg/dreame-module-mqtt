@@ -162,7 +162,7 @@ func (e env) removeEntities() map[string]any {
 	for topic := range discovery(t, caps, version, consumableNames(snap.State), settings) {
 		_ = client.Publish(topic, "", true)
 	}
-	for _, s := range []string{"/state", "/availability", "/settings", "/map", "/map_attributes"} {
+	for _, s := range []string{"/state", "/attributes", "/availability", "/settings", "/map", "/map_attributes"} {
 		_ = client.Publish(t.base+s, "", true)
 	}
 	return map[string]any{"removed": true}

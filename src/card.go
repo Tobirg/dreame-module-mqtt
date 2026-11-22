@@ -35,6 +35,9 @@ func cardYAML(model string, card map[string]any) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `type: custom:xiaomi-vacuum-map-card
 entity: vacuum.%s
+# Tiles and setting menus come from this platform's template: the module names its attributes and
+# entities to match it, so new ones appear without changing this text. Map modes are below.
+vacuum_platform: Tasshack/dreame-vacuum
 map_source:
   camera: camera.%s_map_camera
 calibration_source:
@@ -62,4 +65,57 @@ map_modes:
 		fmt.Fprintf(&b, "      - id: %s\n        label: {text: %s, x: %v, 'y': %v}\n        outline: %s\n", q(id), q(r["name"]), r["x"], r["y"], q(r["outline"]))
 	}
 	return b.String()
+}
+
+// Values the card's Tasshack/dreame-vacuum template translates, by the agent's setting values.
+var attributeNames = map[string]map[float64]string{
+	"cleaning_mode":  {0: "sweeping", 1: "mopping", 2: "sweeping and mopping", 3: "mopping after sweeping"},
+	"mop_humidity":   {1: "slightly_dry", 2: "moist", 3: "wet"},
+	"mop_wash_level": {0: "water saving", 1: "daily", 2: "deep"},
+	"cleaning_route": {1: "standard", 2: "intensive", 3: "deep", 4: "quick"},
+	"cleangenius":    {0: "off", 1: "routine cleaning", 2: "deep cleaning"},
+}
+
+// vacuumAttributes are the vacuum entity's attributes: the card builds its tiles from them, so
+// whatever the robot reports shows up without listing it in the card config.
+func vacuumAttributes(state map[string]any, settings []setting) string {
+	m := map[string]any{}
+	copyAs := func(to string, v any) {
+		if v != nil {
+			m[to] = v
+		}
+	}
+	copyAs("status", state["status_name"])
+	copyAs("battery_level", state["battery"])
+	copyAs("cleaning_time", state["cleaning_time"])
+	copyAs("cleaned_area", state["cleaned_area"])
+	if stats, ok := state["stats"].(map[string]any); ok {
+		copyAs("cleaning_count", stats["cleanings"])
+		copyAs("total_cleaned_area", stats["area"])
+		copyAs("total_cleaning_time", stats["minutes"])
+	}
+	for _, s := range settings {
+		to := s.ID
+		if to == "mop_humidity" {
+			to = "mop_pad_humidity"
+		}
+		switch v := s.Value.(type) {
+		case float64:
+			if names, ok := attributeNames[s.ID]; ok {
+				if name, known := names[v]; known {
+					m[to] = name
+				}
+			} else if s.ID == "wetness_level" {
+				copyAs(to, v)
+			} else if s.ID == "tight_mopping" {
+				copyAs(to, fmt.Sprint(v > 0))
+			}
+		case bool:
+			if s.ID == "tight_mopping" {
+				copyAs(to, fmt.Sprint(v))
+			}
+		}
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
 }

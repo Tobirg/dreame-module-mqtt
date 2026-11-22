@@ -356,3 +356,14 @@ func TestCardYAML(t *testing.T) {
 		t.Fatal("no rooms without a map")
 	}
 }
+
+func TestVacuumAttributes(t *testing.T) {
+	state := map[string]any{"status_name": "charging", "battery": 95.0, "cleaned_area": 2.0, "stats": map[string]any{"cleanings": 33.0, "area": 310.0, "minutes": 360.0}}
+	settings := []setting{{ID: "cleaning_mode", Value: 2.0}, {ID: "mop_humidity", Value: 3.0}, {ID: "tight_mopping", Value: 0.0},
+		{ID: "wetness_level", Value: 12.0}, {ID: "cleaning_route", Value: 9.0}, {ID: "child_lock", Value: true}}
+	want := `{"battery_level":95,"cleaned_area":2,"cleaning_count":33,"cleaning_mode":"sweeping and mopping","mop_pad_humidity":"wet",` +
+		`"status":"charging","tight_mopping":"false","total_cleaned_area":310,"total_cleaning_time":360,"wetness_level":12}`
+	if got := vacuumAttributes(state, settings); got != want {
+		t.Fatal(got)
+	}
+}

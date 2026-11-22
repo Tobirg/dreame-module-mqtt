@@ -231,7 +231,9 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 			"set_fan_speed_topic": t.base + "/fan_speed", "fan_speed_list": fanSpeeds, "send_command_topic": t.base + "/send_command",
 			// Rooms ("segments" in the state) for Home Assistant's area mapping and vacuum.clean_area.
 			"clean_segments_command_topic": t.base + "/clean_segments",
-			"supported_features":           []string{"start", "pause", "stop", "return_home", "locate", "fan_speed", "send_command"},
+			// Attributes named as xiaomi-vacuum-map-card's Tasshack/dreame-vacuum template reads them (card.go).
+			"json_attributes_topic": t.base + "/attributes",
+			"supported_features":    []string{"start", "pause", "stop", "return_home", "locate", "fan_speed", "send_command"},
 		}),
 		t.discovery + "/sensor/" + t.node + "/battery/config": common(map[string]any{
 			"name": "Battery", "unique_id": t.node + "_battery", "state_topic": t.base + "/state", "value_template": "{{ value_json.battery }}",
@@ -479,6 +481,16 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 	suction := 1                    // the robot's current suction, used for map card commands that carry none
 	segments := map[string]string{} // room id -> name from the saved map
 	var settings []setting
+	var state map[string]any
+	lastAttributes := ""
+	publishAttributes := func() error {
+		a := vacuumAttributes(state, settings)
+		if a == lastAttributes {
+			return nil
+		}
+		lastAttributes = a
+		return client.Publish(t.base+"/attributes", a, true)
+	}
 	announce := func() error {
 		for topic, payload := range discovery(t, caps, version, names, settings) {
 			if err := client.Publish(topic, payload, true); err != nil {
@@ -507,7 +519,10 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				return err
 			}
 		}
-		return client.Publish(t.base+"/settings", settingsPayload(list), true)
+		if err := client.Publish(t.base+"/settings", settingsPayload(list), true); err != nil {
+			return err
+		}
+		return publishAttributes()
 	}
 	settingsTick := time.NewTicker(settingsEvery)
 	defer settingsTick.Stop()
@@ -578,7 +593,11 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				if v, ok := s.State["suction"].(float64); ok && v >= 0 && v <= 3 {
 					suction = int(v)
 				}
+				state = s.State
 				if err = client.Publish(t.base+"/state", statePayload(s.State, segments), true); err == nil {
+					err = publishAttributes()
+				}
+				if err == nil {
 					err = publishAvailability("online")
 				}
 			}
