@@ -84,6 +84,16 @@ func (e env) action(name string, stdin io.Reader) (any, error) {
 		}
 		client.Close()
 		return map[string]bool{"ok": true}, nil
+	case "card":
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		var caps capabilities
+		if err := e.get(ctx, "/api/v1/capabilities", &caps); err != nil {
+			return nil, fmt.Errorf("agent capabilities: %w", err)
+		}
+		var card map[string]any
+		_ = e.get(ctx, "/api/v1/map", &card) // no saved map: the card config comes without rooms
+		return map[string]string{"yaml": cardYAML(caps.Identity["model"], card)}, nil
 	case "uninstall":
 		return e.removeEntities(), nil
 	}

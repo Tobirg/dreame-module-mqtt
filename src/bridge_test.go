@@ -290,9 +290,12 @@ func TestBridge(t *testing.T) {
 		"dreame_local/123/command\x00wash_mop":                                                          `{"name":"wash_mop"}`,
 		"dreame_local/123/command\x00reset_main_brush":                                                  `{"consumable":"main_brush","name":"reset_consumable"}`,
 		"dreame_local/123/fan_speed\x00turbo":                                                           `{"name":"set_suction","value":3}`,
-		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","params":{"rooms":[1,2]}}`: `{"name":"clean_rooms","rooms":[1,2]}`,
+		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","params":{"rooms":[1,2]}}`: `{"name":"clean_rooms","repeats":1,"rooms":[1,2],"suction":1,"water":2}`,
 		// Home Assistant merges dict params into the top level.
-		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","rooms":[3]}`: `{"name":"clean_rooms","rooms":[3]}`,
+		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","rooms":[3]}`: `{"name":"clean_rooms","repeats":1,"rooms":[3],"suction":1,"water":2}`,
+		// The map card: string room ids, fractional coordinates, its own repeats.
+		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","rooms":["4"],"repeats":2}`:                        `{"name":"clean_rooms","repeats":2,"rooms":[4],"suction":1,"water":2}`,
+		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_zone","zones":[[-5000.4,"1000",-3800,2200]],"repeats":1}`: `{"name":"clean_zone","repeats":1,"suction":1,"water":2,"zones":[[-5000,1000,-3800,2200]]}`,
 	} {
 		tp, payload, _ := strings.Cut(topic, "\x00")
 		broker.send(tp, payload)
@@ -332,5 +335,24 @@ func TestValidate(t *testing.T) {
 	c := config{Host: " 192.168.2.5 ", BaseTopic: "/home/robot/"}
 	if validate(&c) != nil || c.Host != "192.168.2.5" || c.Port != 1883 || c.BaseTopic != "home/robot" {
 		t.Fatal(c)
+	}
+}
+
+func TestCardYAML(t *testing.T) {
+	card := map[string]any{"rooms": map[string]any{
+		"10": map[string]any{"name": "Кухня", "x": 1, "y": 2, "outline": [][2]int{{0, 0}, {100, 0}, {100, 100}}},
+		"4":  map[string]any{"name": `Комната "4"`, "x": -5, "y": 6, "outline": [][2]int{}},
+	}}
+	y := cardYAML("dreame.vacuum.r2505", card)
+	for _, want := range []string{"entity: vacuum.dreame_r2505\n", "camera: camera.dreame_r2505_map_camera\n", "command: clean_zone",
+		`params: {points: [["[[point_x]]", "[[point_y]]"]], repeats: "[[repeats]]"}`,
+		"      - id: \"4\"\n        label: {text: \"Комната \\\"4\\\"\", x: -5, 'y': 6}\n        outline: []\n      - id: \"10\"",
+		"outline: [[0,0],[100,0],[100,100]]"} {
+		if !strings.Contains(y, want) {
+			t.Fatalf("missing %q in\n%s", want, y)
+		}
+	}
+	if strings.Contains(cardYAML("dreame.vacuum.r2505", nil), "ROOM") {
+		t.Fatal("no rooms without a map")
 	}
 }

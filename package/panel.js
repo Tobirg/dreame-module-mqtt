@@ -11,6 +11,10 @@ export default function mount(el, ctx) {
 <label>Базовый топик<input data-r="base_topic" autocomplete="off" placeholder="dreame_local/&lt;id робота&gt;"></label>
 <label>Префикс обнаружения Home Assistant<input data-r="discovery_prefix" autocomplete="off" placeholder="homeassistant"></label></details>
 <div class="row"><button data-r="save" class="primary">Сохранить</button><button data-r="test">Сохранить и проверить</button></div>
+<details data-r="card"><summary>Карточка карты для Home Assistant</summary>
+<p class="muted small">Для карточки xiaomi-vacuum-map-card (HACS): зоны, точки и комнаты робота. В Home Assistant: панель → «Изменить» → «Добавить карточку» → «Вручную», вставить текст. Если сущности пылесоса или камеры карты переименованы, поправьте их в первых строках.</p>
+<textarea data-r="yaml" rows="12" readonly spellcheck="false"></textarea>
+<div class="row"><button data-r="copy">Скопировать</button></div></details>
 <p class="muted small">Подойдёт тот же брокер, что у Zigbee2MQTT. Home Assistant найдёт пылесос сам, если в нём настроена интеграция MQTT. Пароль хранится на роботе и сюда не возвращается.</p>`;
   const $ = name => el.querySelector(`[data-r="${name}"]`);
   const fields = ['enabled', 'host', 'port', 'username', 'base_topic', 'discovery_prefix'];
@@ -45,6 +49,15 @@ export default function mount(el, ctx) {
   };
   $('test').onclick = async () => {
     try { await save(); await ctx.call('test'); ctx.toast('Брокер принял подключение'); setTimeout(refresh, 3000); } catch (e) { ctx.toast(e.message, true); }
+  };
+  $('card').ontoggle = async () => {
+    if (!$('card').open) return;
+    $('yaml').value = 'Загрузка…';
+    try { $('yaml').value = (await ctx.read('card')).yaml; } catch (e) { $('yaml').value = ''; ctx.toast(e.message, true); }
+  };
+  $('copy').onclick = async () => {
+    try { await navigator.clipboard.writeText($('yaml').value); ctx.toast('Скопировано'); }
+    catch { $('yaml').select(); ctx.toast('Выделено — скопируйте Ctrl+C'); }
   };
   refresh();
   setInterval(() => { if (!document.hidden) refresh(); }, 15000);

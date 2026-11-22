@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -362,10 +363,43 @@ func commandFor(t topics, msg message, suction int) (map[string]any, error) {
 					cmd[k] = v
 				}
 			}
+			if name == "clean_zone" || name == "clean_spot" || name == "clean_rooms" {
+				// The map card sends room ids as strings and may send fractional coordinates.
+				for _, k := range []string{"rooms", "zones", "points"} {
+					if v, ok := cmd[k]; ok {
+						cmd[k] = integers(v)
+					}
+				}
+				defaults := map[string]any{"repeats": 1, "suction": suction, "water": 2}
+				for k, v := range defaults {
+					if _, ok := cmd[k]; !ok {
+						cmd[k] = v
+					}
+				}
+			}
 			return cmd, nil
 		}
 	}
 	return nil, fmt.Errorf("unsupported %s payload %q", msg.Topic, payload)
+}
+
+// integers rounds numbers and numeric strings inside nested lists; anything else is left for the agent to reject.
+func integers(v any) any {
+	switch x := v.(type) {
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = integers(e)
+		}
+		return out
+	case float64:
+		return int(math.Round(x))
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(x), 64); err == nil {
+			return int(math.Round(f))
+		}
+	}
+	return v
 }
 
 // ---- service

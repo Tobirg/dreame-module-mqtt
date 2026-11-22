@@ -20,7 +20,7 @@
 | Батарея | заряд, % |
 | Ошибка | название ошибки (`no_error`, `bin_full`, …) |
 | Карта | картинка сохранённой карты со станцией, а во время уборки — с роботом, путём, вымытым полом и убираемой зоной; обновляется каждые 15 с, если изменилась |
-| Камера карты | та же картинка как камера — для карточки карты; атрибуты `calibration_points` и `rooms` с именами, центрами и контурами комнат (агент 0.22+, контуры — 0.22.2+) |
+| Камера карты | та же картинка как камера — для карточки карты; атрибуты `calibration_points` и `rooms` с именами, центрами и контурами комнат (агент 0.22+, контуры — 0.22.2+); текст карточки карты — в панели модуля |
 | Настройки | переключатели, списки и числа из раздела «Настройки» панели агента, только те, что есть у робота (агент 0.22+); обновляются раз в 2 минуты и через 3 с после изменения |
 | Расходники | остаток ресурса в % для того, что отдаёт модель (щётки, фильтр, датчики, колёса), и кнопки «Reset …» для сброса после замены или чистки |
 | Кнопки станции | выгрузка пыли, мойка салфеток, начать и остановить сушку — только если модель робота их поддерживает |
@@ -57,72 +57,11 @@ params: {setting: child_lock, to: true}
 
 ## Карта с выбором зон, точек и комнат
 
-Карточка [xiaomi-vacuum-map-card](https://github.com/PiotrMachowski/lovelace-xiaomi-vacuum-map-card) (ставится через HACS) берёт карту и калибровку у «Камеры карты» и отправляет команды через `vacuum.send_command`. Номера и центры комнат — в атрибуте `rooms` камеры (Инструменты разработчика → Состояния).
+Карточка [xiaomi-vacuum-map-card](https://github.com/PiotrMachowski/lovelace-xiaomi-vacuum-map-card) (ставится через HACS) берёт карту и калибровку у «Камеры карты».
 
-Проще всего — платформа **send_command** в редакторе карточки: модуль понимает её стандартные команды (`app_zoned_clean` — уборка зоны, `app_segment_clean` — уборка комнат, `app_goto_target` — уборка квадрата 1,5 × 1,5 м вокруг точки: отдельного «ехать в точку» здесь нет). Мощность — текущая у робота, влажность — средняя. Карта и калибровка:
+Готовый текст карточки собирает сам модуль: веб-интерфейс агента → «Модули» → «MQTT и Home Assistant» → «Карточка карты для Home Assistant» → «Скопировать». В Home Assistant: панель → «Изменить» → «Добавить карточку» → «Вручную», вставить. В тексте три режима — зона, точка (робот убирает квадрат 1,5 × 1,5 м вокруг неё) и комнаты с именами и контурами с карты робота (модуль 1.6+, агент 0.22.2+). Мощность — текущая у робота (меняется в меню карточки), влажность — средняя, повторы — кнопкой карточки. Если сущности пылесоса или камеры переименованы в Home Assistant, поправьте их в первых строках. После изменения комнат на карте текст нужно взять заново.
 
-```yaml
-type: custom:xiaomi-vacuum-map-card
-entity: vacuum.dreame_r2505
-vacuum_platform: send_command
-map_source:
-  camera: camera.dreame_r2505_map_camera
-calibration_source:
-  camera: true
-```
-
-Комнаты вручную вписывать не нужно: без `map_modes` в визуальном редакторе карточки нажмите **Generate rooms config** один раз — карточка добавит режимы зоны и точки и режим комнат с номерами, именами и контурами из атрибута `rooms` камеры (агент 0.22.2+). Если `map_modes` уже есть, а в них испорченные записи (`null`, режим без `template`), удалите `map_modes` целиком и нажмите кнопку заново: генератор карточки (2.4.1) вписывает комнаты по номеру режима без проверки и при рассинхроне с предпросмотром ломает список.
-
-Свои режимы со своими мощностью и влажностью:
-
-```yaml
-type: custom:xiaomi-vacuum-map-card
-entity: vacuum.dreame_r2505
-map_source:
-  camera: camera.dreame_r2505_map_camera
-calibration_source:
-  entity: camera.dreame_r2505_map_camera
-  attribute: calibration_points
-map_modes:
-  - name: Зона
-    icon: mdi:select-drag
-    selection_type: MANUAL_RECTANGLE
-    max_selections: 5
-    repeats_type: EXTERNAL
-    max_repeats: 3
-    service_call_schema:
-      service: vacuum.send_command
-      service_data:
-        entity_id: "[[entity_id]]"
-        command: clean_zone
-        params: {zones: "[[selection]]", repeats: "[[repeats]]", suction: 1, water: 2}
-  - name: Точка
-    icon: mdi:map-marker
-    selection_type: MANUAL_POINT
-    repeats_type: EXTERNAL
-    max_repeats: 3
-    service_call_schema:
-      service: vacuum.send_command
-      service_data:
-        entity_id: "[[entity_id]]"
-        command: clean_spot
-        params: {points: [["[[point_x]]", "[[point_y]]"]], repeats: "[[repeats]]", suction: 1, water: 2}
-  - name: Комнаты
-    icon: mdi:floor-plan
-    selection_type: ROOM
-    max_selections: 10
-    repeats_type: EXTERNAL
-    max_repeats: 3
-    service_call_schema:
-      service: vacuum.send_command
-      service_data:
-        entity_id: "[[entity_id]]"
-        command: clean_rooms
-        params: {rooms: "[[selection]]", repeats: "[[repeats]]", suction: 1, water: 2}
-    # predefined_selections заполнит кнопка Generate rooms config в редакторе карточки
-```
-
-Мощность (`suction` 0–3) и влажность (`water` 1–3) в примере постоянные; их можно вынести в `variables` карточки.
+Режимы карточки вызывают `vacuum.send_command` с параметрами-словарём (`command: clean_zone`, `params: {zones: "[[selection]]", ...}`). Платформа карточки **send_command** и кнопка **Generate rooms config** здесь не подходят: они отправляют параметры списком, а MQTT-пылесос Home Assistant списки не передаёт.
 
 ## Топики
 
@@ -132,7 +71,7 @@ map_modes:
 - `<база>/availability` — `online`/`offline`: робот на связи, агент отвечает, данные свежие. При потере связи с брокером `offline` публикует сам брокер (last will);
 - `<база>/command` — `start`, `pause`, `stop`, `return_to_base`, `locate`, `empty`, `wash_mop`, `dry_start`, `dry_stop`;
 - `<база>/fan_speed` — скорость из списка выше;
-- `<база>/send_command` — `{"command": "...", "params": {...}}`;
+- `<база>/send_command` — `{"command": "...", "params": {...}}` или параметры на верхнем уровне, как их шлёт Home Assistant; для `clean_zone`, `clean_spot`, `clean_rooms` недостающие `repeats`, `suction`, `water` — 1, текущая мощность, 2;
 - `<база>/settings` — JSON настроек (`ON`/`OFF`, подпись варианта или число), retained;
 - `<база>/setting/<id>/set` — новое значение настройки в том же виде;
 - `<база>/map`, `<база>/map_attributes` — картинка карты и её калибровка с комнатами, retained.
@@ -141,7 +80,7 @@ map_modes:
 
 ## Как устроено
 
-Один бинарник `mqtt-bridge` (Go, без внешних зависимостей) служит и обработчиком действий (`status`, `configure`, `test`, `uninstall`), и фоновым процессом (`mqtt-bridge run`). Агент запускает этот процесс сам, перезапускает при сбое и останавливает при обновлении или удалении модуля. Состояние приходит из потока событий агента `GET /api/v1/events`, команды уходят в `POST /api/v1/command` с токеном модуля.
+Один бинарник `mqtt-bridge` (Go, без внешних зависимостей) служит и обработчиком действий (`status`, `card`, `configure`, `test`, `uninstall`), и фоновым процессом (`mqtt-bridge run`). Агент запускает этот процесс сам, перезапускает при сбое и останавливает при обновлении или удалении модуля. Состояние приходит из потока событий агента `GET /api/v1/events`, команды уходят в `POST /api/v1/command` с токеном модуля.
 
 Ограничения: MQTT 3.1.1, QoS 0, без TLS — рассчитано на брокер в домашней сети.
 
