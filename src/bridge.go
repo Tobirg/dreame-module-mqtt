@@ -343,25 +343,21 @@ func commandFor(t topics, msg message, suction int) (map[string]any, error) {
 			}
 		}
 	case t.base + "/send_command":
-		// Home Assistant sends {"command": ..., "params": {...}}, or the bare command without params.
-		var req struct {
-			Command string          `json:"command"`
-			Params  json.RawMessage `json:"params"`
-		}
+		// Home Assistant's MQTT vacuum sends the bare command, or {"command": ..., <dict params merged in>}
+		// (list params are dropped by Home Assistant). A nested "params" object is accepted too.
+		var req map[string]any
 		if json.Unmarshal([]byte(payload), &req) != nil {
-			req.Command = payload
+			req = map[string]any{"command": payload}
 		}
-		if cmd, ok := cardCommand(req.Command, req.Params, suction); ok {
-			return cmd, nil
+		name, _ := req["command"].(string)
+		params, nested := req["params"].(map[string]any)
+		if !nested {
+			params = req
 		}
-		var params map[string]any
-		if len(req.Params) > 0 && json.Unmarshal(req.Params, &params) != nil {
-			return nil, fmt.Errorf("%s: params must be an object", req.Command)
-		}
-		if req.Command != "" {
-			cmd := map[string]any{"name": req.Command}
+		if name != "" {
+			cmd := map[string]any{"name": name}
 			for k, v := range params {
-				if k != "name" {
+				if k != "name" && k != "command" {
 					cmd[k] = v
 				}
 			}
@@ -369,50 +365,6 @@ func commandFor(t topics, msg message, suction int) (map[string]any, error) {
 		}
 	}
 	return nil, fmt.Errorf("unsupported %s payload %q", msg.Topic, payload)
-}
-
-// cardCommand understands the commands of xiaomi-vacuum-map-card's send_command platform, so the
-// card works with its built-in templates: zones and rooms as in the card, "go to" as a spot clean
-// (the X50 has no go-to here). Water is the middle level; suction is the robot's current one.
-func cardCommand(command string, raw json.RawMessage, suction int) (map[string]any, bool) {
-	switch command {
-	case "app_zoned_clean": // [[x1, y1, x2, y2, repeats], ...]
-		var zones [][]int
-		if json.Unmarshal(raw, &zones) != nil || len(zones) == 0 {
-			return nil, false
-		}
-		repeats, out := 1, [][]int{}
-		for _, z := range zones {
-			if len(z) < 4 {
-				return nil, false
-			}
-			if len(z) > 4 {
-				repeats = max(repeats, z[4])
-			}
-			out = append(out, z[:4])
-		}
-		return map[string]any{"name": "clean_zone", "zones": out, "repeats": min(repeats, 3), "suction": suction, "water": 2}, true
-	case "app_segment_clean": // room ids, the list repeated once per pass
-		var ids []int
-		if json.Unmarshal(raw, &ids) != nil || len(ids) == 0 {
-			return nil, false
-		}
-		rooms, seen := []int{}, map[int]int{}
-		for _, id := range ids {
-			if seen[id] == 0 {
-				rooms = append(rooms, id)
-			}
-			seen[id]++
-		}
-		return map[string]any{"name": "clean_rooms", "rooms": rooms, "repeats": min(seen[rooms[0]], 3), "suction": suction, "water": 2}, true
-	case "app_goto_target": // [x, y]
-		var p []int
-		if json.Unmarshal(raw, &p) != nil || len(p) < 2 {
-			return nil, false
-		}
-		return map[string]any{"name": "clean_spot", "points": [][]int{p[:2]}, "repeats": 1, "suction": suction, "water": 2}, true
-	}
-	return nil, false
 }
 
 // ---- service
@@ -477,7 +429,8 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			return err
 		}
 	}
-	if err := client.Subscribe(t.base+"/command", t.base+"/fan_speed", t.base+"/send_command", t.base+"/setting/+/set", t.base+"/clean_segments"); err != nil {
+	subscriptions := []string{t.base + "/command", t.base + "/fan_speed", t.base + "/send_command", t.base + "/setting/+/set", t.base + "/clean_segments"}
+	if err := client.Subscribe(subscriptions...); err != nil {
 		return err
 	}
 	e.setStatus("connected", broker, "")
@@ -607,6 +560,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				settingsSoon.Reset(3 * time.Second) // show the robot's value, also after a refusal
 			}
 			if err == nil {
+				log.Printf("command %v from %s", cmd["name"], strings.TrimPrefix(msg.Topic, t.base+"/"))
 				cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 				err = e.command(cctx, cmd)
 				cancel()

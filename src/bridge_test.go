@@ -291,6 +291,8 @@ func TestBridge(t *testing.T) {
 		"dreame_local/123/command\x00reset_main_brush":                                                  `{"consumable":"main_brush","name":"reset_consumable"}`,
 		"dreame_local/123/fan_speed\x00turbo":                                                           `{"name":"set_suction","value":3}`,
 		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","params":{"rooms":[1,2]}}`: `{"name":"clean_rooms","rooms":[1,2]}`,
+		// Home Assistant merges dict params into the top level.
+		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","rooms":[3]}`: `{"name":"clean_rooms","rooms":[3]}`,
 	} {
 		tp, payload, _ := strings.Cut(topic, "\x00")
 		broker.send(tp, payload)
