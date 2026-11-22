@@ -1,0 +1,41 @@
+# Tests on every push and pull request; a tag v<version> also publishes the module package.
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+      - name: Go tests
+        run: cd src && go vet ./... && go test ./...
+      - name: Package
+        run: mkdir -p dist && sh build.sh | tee dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mqtt-module
+          path: dist/
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mqtt-module
+          path: dist
+      - name: Tag must match the manifest version
+        run: test -f "dist/mqtt-${GITHUB_REF_NAME#v}.tar.gz"
+      - name: Publish
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
