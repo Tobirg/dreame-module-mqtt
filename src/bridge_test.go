@@ -170,7 +170,7 @@ func newAgent(t *testing.T) *fakeAgent {
 				`{"id":"mop_pad_swing","label":"Покачивание швабры","kind":"select","auto":"MopScalable","options":[{"value":0,"label":"Выключено"},{"value":1,"label":"Авто"}],"value":-1},`+
 				`{"id":"drying_time","label":"Время сушки","kind":"number","min":2,"max":12,"step":1,"value":3}]}`)
 		case "/api/v1/map":
-			fmt.Fprint(w, `{"result":{"map_id":2,"calibration_points":[{"vacuum":{"x":0,"y":0},"map":{"x":6,"y":-3}}],"rooms":{"1":"Кухня"}}}`)
+			fmt.Fprint(w, `{"result":{"map_id":2,"calibration_points":[{"vacuum":{"x":0,"y":0},"map":{"x":6,"y":-3}}],"rooms":{"1":{"name":"Кухня","x":0,"y":0}}}}`)
 		case "/api/v1/map.png":
 			w.Header().Set("Content-Type", "image/png")
 			fmt.Fprint(w, "\x89PNG-test")
@@ -265,6 +265,12 @@ func TestBridge(t *testing.T) {
 	})
 	if v, _ := broker.get("dreame_local/123/state"); !strings.Contains(v, `"state":"docked"`) || !strings.Contains(v, `"battery":95`) {
 		t.Fatal(v)
+	}
+	if v, _ := broker.get("dreame_local/123/state"); !strings.Contains(v, `"segments":{"1":"Кухня"}`) {
+		t.Fatal("segments", v)
+	}
+	if !strings.Contains(vac, `"clean_segments_command_topic":"dreame_local/123/clean_segments"`) {
+		t.Fatal(vac)
 	}
 	if v, _ := broker.get("dreame_local/123/state"); !strings.Contains(v, `"consumables":{"main_brush":52}`) {
 		t.Fatal(v)

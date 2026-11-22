@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -226,7 +227,9 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 		t.discovery + "/vacuum/" + t.node + "/config": common(map[string]any{
 			"name": nil, "unique_id": t.node + "_vacuum", "state_topic": t.base + "/state", "command_topic": t.base + "/command",
 			"set_fan_speed_topic": t.base + "/fan_speed", "fan_speed_list": fanSpeeds, "send_command_topic": t.base + "/send_command",
-			"supported_features": []string{"start", "pause", "stop", "return_home", "locate", "fan_speed", "send_command"},
+			// Rooms ("segments" in the state) for Home Assistant's area mapping and vacuum.clean_area.
+			"clean_segments_command_topic": t.base + "/clean_segments",
+			"supported_features":           []string{"start", "pause", "stop", "return_home", "locate", "fan_speed", "send_command"},
 		}),
 		t.discovery + "/sensor/" + t.node + "/battery/config": common(map[string]any{
 			"name": "Battery", "unique_id": t.node + "_battery", "state_topic": t.base + "/state", "value_template": "{{ value_json.battery }}",
@@ -273,7 +276,7 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 	return out
 }
 
-func statePayload(s map[string]any) string {
+func statePayload(s map[string]any, segments map[string]string) string {
 	m := map[string]any{"state": s["activity"], "battery": s["battery"], "error": s["error"], "error_name": s["error_name"], "station": s["station"], "status": s["status_name"]}
 	if parts, ok := s["consumables"].(map[string]any); ok {
 		left := map[string]any{}
@@ -286,6 +289,9 @@ func statePayload(s map[string]any) string {
 	}
 	if v, ok := s["suction"].(float64); ok && int(v) >= 0 && int(v) < len(fanSpeeds) {
 		m["fan_speed"] = fanSpeeds[int(v)]
+	}
+	if len(segments) > 0 {
+		m["segments"] = segments
 	}
 	b, _ := json.Marshal(m)
 	return string(b)
@@ -316,6 +322,19 @@ func commandFor(t topics, msg message, suction int) (map[string]any, error) {
 		}
 		if part, ok := strings.CutPrefix(payload, "reset_"); ok && consumableRe.MatchString(part) {
 			return map[string]any{"name": "reset_consumable", "consumable": part}, nil
+		}
+	case t.base + "/clean_segments": // ["3", "4"] from vacuum.clean_area
+		var ids []string
+		if json.Unmarshal([]byte(payload), &ids) == nil && len(ids) > 0 {
+			rooms := []int{}
+			for _, id := range ids {
+				n, err := strconv.Atoi(id)
+				if err != nil {
+					return nil, fmt.Errorf("room id %q", id)
+				}
+				rooms = append(rooms, n)
+			}
+			return map[string]any{"name": "clean_rooms", "rooms": rooms, "repeats": 1, "suction": suction, "water": 2}, nil
 		}
 	case t.base + "/fan_speed":
 		for i, f := range fanSpeeds {
@@ -458,7 +477,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			return err
 		}
 	}
-	if err := client.Subscribe(t.base+"/command", t.base+"/fan_speed", t.base+"/send_command", t.base+"/setting/+/set"); err != nil {
+	if err := client.Subscribe(t.base+"/command", t.base+"/fan_speed", t.base+"/send_command", t.base+"/setting/+/set", t.base+"/clean_segments"); err != nil {
 		return err
 	}
 	e.setStatus("connected", broker, "")
@@ -469,7 +488,8 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 	snaps := make(chan *snapshot)
 	go e.events(sctx, snaps)
 	availability, announced, names := "", "", []string(nil)
-	suction := 1 // the robot's current suction, used for map card commands that carry none
+	suction := 1                    // the robot's current suction, used for map card commands that carry none
+	segments := map[string]string{} // room id -> name from the saved map
 	var settings []setting
 	announce := func() error {
 		for topic, payload := range discovery(t, caps, version, names, settings) {
@@ -529,6 +549,13 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		lastMap = string(img)
 		var card map[string]any
 		if e.get(mctx, "/api/v1/map", &card) == nil {
+			rooms, _ := card["rooms"].(map[string]any)
+			segments = map[string]string{}
+			for id, r := range rooms {
+				if room, ok := r.(map[string]any); ok {
+					segments[id] = fmt.Sprint(room["name"])
+				}
+			}
 			b, _ := json.Marshal(card)
 			if err := client.Publish(t.base+"/map_attributes", string(b), true); err != nil {
 				return err
@@ -563,7 +590,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				if v, ok := s.State["suction"].(float64); ok && v >= 0 && v <= 3 {
 					suction = int(v)
 				}
-				if err = client.Publish(t.base+"/state", statePayload(s.State), true); err == nil {
+				if err = client.Publish(t.base+"/state", statePayload(s.State, segments), true); err == nil {
 					err = publishAvailability("online")
 				}
 			}
