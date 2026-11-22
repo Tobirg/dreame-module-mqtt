@@ -19,7 +19,9 @@
 | Пылесос | старт, пауза, стоп, на базу, найти, мощность (`quiet`, `standard`, `strong`, `turbo`), `vacuum.send_command` |
 | Батарея | заряд, % |
 | Ошибка | название ошибки (`no_error`, `bin_full`, …) |
-| Карта | картинка сохранённой карты со станцией, а во время уборки — с роботом и путём; обновляется каждые 15 с, если изменилась |
+| Карта | картинка сохранённой карты со станцией, а во время уборки — с роботом, путём, вымытым полом и убираемой зоной; обновляется каждые 15 с, если изменилась |
+| Камера карты | та же картинка как камера — для карточки карты; атрибуты `calibration_points` и `rooms` (агент 0.22+) |
+| Настройки | переключатели, списки и числа из раздела «Настройки» панели агента, только те, что есть у робота (агент 0.22+); обновляются раз в 2 минуты и через 3 с после изменения |
 | Расходники | остаток ресурса в % для того, что отдаёт модель (щётки, фильтр, датчики, колёса), и кнопки «Reset …» для сброса после замены или чистки |
 | Кнопки станции | выгрузка пыли, мойка салфеток, начать и остановить сушку — только если модель робота их поддерживает |
 
@@ -36,6 +38,74 @@ data:
 
 `command` — любая команда агента (`POST /api/v1/command`), `params` — её параметры.
 
+Зона, точка (робот убирает квадрат 1,5 × 1,5 м вокруг неё) и настройка — координаты в миллиметрах робота, их показывает панель агента:
+
+```yaml
+command: clean_zone
+params: {zones: [[-5000, 1000, -3800, 2200]], repeats: 1, suction: 1, water: 2}
+---
+command: clean_spot
+params: {points: [[-4400, 1600]], repeats: 1, suction: 1, water: 2}
+---
+command: set_setting
+params: {setting: child_lock, to: true}
+```
+
+## Карта с выбором зон, точек и комнат
+
+Карточка [xiaomi-vacuum-map-card](https://github.com/PiotrMachowski/lovelace-xiaomi-vacuum-map-card) (ставится через HACS) берёт карту и калибровку у «Камеры карты» и отправляет команды через `vacuum.send_command`. Номера и центры комнат — в атрибуте `rooms` камеры (Инструменты разработчика → Состояния).
+
+```yaml
+type: custom:xiaomi-vacuum-map-card
+entity: vacuum.dreame_r2505
+map_source:
+  camera: camera.dreame_r2505_map_camera
+calibration_source:
+  entity: camera.dreame_r2505_map_camera
+  attribute: calibration_points
+map_modes:
+  - name: Зона
+    icon: mdi:select-drag
+    selection_type: MANUAL_RECTANGLE
+    max_selections: 5
+    repeats_type: EXTERNAL
+    max_repeats: 3
+    service_call_schema:
+      service: vacuum.send_command
+      service_data:
+        entity_id: "[[entity_id]]"
+        command: clean_zone
+        params: {zones: "[[selection]]", repeats: "[[repeats]]", suction: 1, water: 2}
+  - name: Точка
+    icon: mdi:map-marker
+    selection_type: MANUAL_POINT
+    repeats_type: EXTERNAL
+    max_repeats: 3
+    service_call_schema:
+      service: vacuum.send_command
+      service_data:
+        entity_id: "[[entity_id]]"
+        command: clean_spot
+        params: {points: [["[[point_x]]", "[[point_y]]"]], repeats: "[[repeats]]", suction: 1, water: 2}
+  - name: Комнаты
+    icon: mdi:floor-plan
+    selection_type: ROOM
+    max_selections: 10
+    repeats_type: EXTERNAL
+    max_repeats: 3
+    service_call_schema:
+      service: vacuum.send_command
+      service_data:
+        entity_id: "[[entity_id]]"
+        command: clean_rooms
+        params: {rooms: "[[selection]]", repeats: "[[repeats]]", suction: 1, water: 2}
+    predefined_selections:   # по одной на комнату: id и центр из атрибута rooms
+      - id: 4
+        label: {text: Коридор, x: -4482, y: 1035}
+```
+
+Мощность (`suction` 0–3) и влажность (`water` 1–3) в примере постоянные; их можно вынести в `variables` карточки.
+
 ## Топики
 
 База по умолчанию — `dreame_local/<id робота>`:
@@ -44,9 +114,12 @@ data:
 - `<база>/availability` — `online`/`offline`: робот на связи, агент отвечает, данные свежие. При потере связи с брокером `offline` публикует сам брокер (last will);
 - `<база>/command` — `start`, `pause`, `stop`, `return_to_base`, `locate`, `empty`, `wash_mop`, `dry_start`, `dry_stop`;
 - `<база>/fan_speed` — скорость из списка выше;
-- `<база>/send_command` — `{"command": "...", "params": {...}}`.
+- `<база>/send_command` — `{"command": "...", "params": {...}}`;
+- `<база>/settings` — JSON настроек (`ON`/`OFF`, подпись варианта или число), retained;
+- `<база>/setting/<id>/set` — новое значение настройки в том же виде;
+- `<база>/map`, `<база>/map_attributes` — картинка карты и её калибровка с комнатами, retained.
 
-Автообнаружение: `<префикс>/vacuum|sensor|button/dreame_<id>/.../config`, префикс по умолчанию `homeassistant`.
+Автообнаружение: `<префикс>/vacuum|sensor|button|image|camera|switch|select|number/dreame_<id>/.../config`, префикс по умолчанию `homeassistant`.
 
 ## Как устроено
 

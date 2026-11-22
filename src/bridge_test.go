@@ -164,6 +164,13 @@ func newAgent(t *testing.T) *fakeAgent {
 					w.(http.Flusher).Flush()
 				}
 			}
+		case "/api/v1/settings":
+			fmt.Fprint(w, `{"result":[{"id":"child_lock","label":"Блокировка от детей","kind":"bool","value":0},`+
+				`{"id":"cleaning_mode","label":"Режим уборки","kind":"select","options":[{"value":0,"label":"Сухая уборка"},{"value":2,"label":"Сухая и Влажная Уборка"}],"value":2},`+
+				`{"id":"mop_pad_swing","label":"Покачивание швабры","kind":"select","auto":"MopScalable","options":[{"value":0,"label":"Выключено"},{"value":1,"label":"Авто"}],"value":-1},`+
+				`{"id":"drying_time","label":"Время сушки","kind":"number","min":2,"max":12,"step":1,"value":3}]}`)
+		case "/api/v1/map":
+			fmt.Fprint(w, `{"result":{"map_id":2,"calibration_points":[{"vacuum":{"x":0,"y":0},"map":{"x":6,"y":-3}}],"rooms":{"1":"Кухня"}}}`)
 		case "/api/v1/map.png":
 			w.Header().Set("Content-Type", "image/png")
 			fmt.Fprint(w, "\x89PNG-test")
@@ -209,6 +216,28 @@ func TestBridge(t *testing.T) {
 	waitFor(t, "map picture", func() bool { v, _ := broker.get("dreame_local/123/map"); return v == "\x89PNG-test" })
 	if v, _ := broker.get("homeassistant/image/dreame_123/map/config"); !strings.Contains(v, `"image_topic":"dreame_local/123/map"`) {
 		t.Fatal("map image entity", v)
+	}
+	if v, _ := broker.get("homeassistant/image/dreame_123/map/config"); !strings.Contains(v, `"json_attributes_topic":"dreame_local/123/map_attributes"`) {
+		t.Fatal("map attributes topic", v)
+	}
+	if v, _ := broker.get("homeassistant/camera/dreame_123/map/config"); !strings.Contains(v, `"topic":"dreame_local/123/map"`) {
+		t.Fatal("map camera", v)
+	}
+	if v, _ := broker.get("dreame_local/123/map_attributes"); !strings.Contains(v, `"calibration_points":[{"map":{"x":6,"y":-3},"vacuum":{"x":0,"y":0}}]`) {
+		t.Fatal("map attributes", v)
+	}
+	waitFor(t, "settings", func() bool { _, ok := broker.get("dreame_local/123/settings"); return ok })
+	if v, _ := broker.get("dreame_local/123/settings"); v != `{"child_lock":"OFF","cleaning_mode":"Сухая и Влажная Уборка","drying_time":3,"mop_pad_swing":"Выключено"}` {
+		t.Fatal("settings state", v)
+	}
+	if v, _ := broker.get("homeassistant/switch/dreame_123/setting_child_lock/config"); !strings.Contains(v, `"command_topic":"dreame_local/123/setting/child_lock/set"`) || !strings.Contains(v, `"entity_category":"config"`) {
+		t.Fatal("switch", v)
+	}
+	if v, _ := broker.get("homeassistant/select/dreame_123/setting_cleaning_mode/config"); !strings.Contains(v, `"options":["Сухая уборка","Сухая и Влажная Уборка"]`) {
+		t.Fatal("select", v)
+	}
+	if v, _ := broker.get("homeassistant/number/dreame_123/setting_drying_time/config"); !strings.Contains(v, `"max":12`) {
+		t.Fatal("number", v)
 	}
 	if broker.connects[0] != "ha:secret will=dreame_local/123/availability" {
 		t.Fatal(broker.connects)

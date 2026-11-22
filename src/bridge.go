@@ -86,7 +86,16 @@ func (e env) get(ctx context.Context, path string, v any) error {
 	return json.Unmarshal(body.Result, v)
 }
 
-var mapEvery = 15 * time.Second
+var mapEvery, settingsEvery = 15 * time.Second, 2 * time.Minute
+
+// settingTopic returns the setting id of <base>/setting/<id>/set.
+func settingTopic(t topics, topic string) (string, bool) {
+	id, ok := strings.CutPrefix(topic, t.base+"/setting/")
+	if id, ok2 := strings.CutSuffix(id, "/set"); ok && ok2 && settingIDRe.MatchString(id) {
+		return id, true
+	}
+	return "", false
+}
 
 // raw returns a non-JSON agent resource such as the map picture.
 func (e env) raw(ctx context.Context, path string) ([]byte, error) {
@@ -199,7 +208,7 @@ func topicsFor(c config, did string) topics {
 }
 
 // discovery returns retained config messages; an empty payload removes an entity.
-func discovery(t topics, caps capabilities, version string, parts []string) map[string]string {
+func discovery(t topics, caps capabilities, version string, parts []string, settings []setting) map[string]string {
 	id := caps.Identity
 	model := id["model"]
 	device := map[string]any{"identifiers": []string{t.node}, "name": "Dreame " + strings.TrimPrefix(model, "dreame.vacuum."),
@@ -229,6 +238,13 @@ func discovery(t topics, caps capabilities, version string, parts []string) map[
 		}),
 		t.discovery + "/image/" + t.node + "/map/config": common(map[string]any{
 			"name": "Map", "unique_id": t.node + "_map", "image_topic": t.base + "/map", "content_type": "image/png",
+			// calibration_points and rooms for map cards such as xiaomi-vacuum-map-card
+			"json_attributes_topic": t.base + "/map_attributes",
+		}),
+		// The same picture as a camera: map cards take their map from a camera entity.
+		t.discovery + "/camera/" + t.node + "/map/config": common(map[string]any{
+			"name": "Map camera", "unique_id": t.node + "_map_camera", "topic": t.base + "/map",
+			"json_attributes_topic": t.base + "/map_attributes",
 		}),
 	}
 	for _, name := range parts {
@@ -242,6 +258,9 @@ func discovery(t topics, caps capabilities, version string, parts []string) map[
 			"name": "Reset " + strings.ReplaceAll(name, "_", " "), "unique_id": t.node + "_reset_" + name,
 			"command_topic": t.base + "/command", "payload_press": "reset_" + name, "entity_category": "config", "icon": "mdi:restore",
 		})
+	}
+	for topic, payload := range settingDiscovery(t, common, settings) {
+		out[topic] = payload
 	}
 	for _, b := range buttons {
 		topic := t.discovery + "/button/" + t.node + "/" + b.command + "/config"
@@ -383,12 +402,12 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		return err
 	}
 	defer client.Close()
-	for topic, payload := range discovery(t, caps, version, nil) {
+	for topic, payload := range discovery(t, caps, version, nil, nil) {
 		if err := client.Publish(topic, payload, true); err != nil {
 			return err
 		}
 	}
-	if err := client.Subscribe(t.base+"/command", t.base+"/fan_speed", t.base+"/send_command"); err != nil {
+	if err := client.Subscribe(t.base+"/command", t.base+"/fan_speed", t.base+"/send_command", t.base+"/setting/+/set"); err != nil {
 		return err
 	}
 	e.setStatus("connected", broker, "")
@@ -398,7 +417,43 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 	defer stop()
 	snaps := make(chan *snapshot)
 	go e.events(sctx, snaps)
-	availability, announced := "", ""
+	availability, announced, names := "", "", []string(nil)
+	var settings []setting
+	announce := func() error {
+		for topic, payload := range discovery(t, caps, version, names, settings) {
+			if err := client.Publish(topic, payload, true); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// Settings come from the agent (0.22+); an older agent just has none.
+	settingsKey := ""
+	readSettings := func() error {
+		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		var list []setting
+		if err := e.get(rctx, "/api/v1/settings", &list); err != nil {
+			return nil
+		}
+		settings = list
+		ids := []string{}
+		for _, s := range list {
+			ids = append(ids, s.ID)
+		}
+		if key := strings.Join(ids, ","); key != settingsKey {
+			settingsKey = key
+			if err := announce(); err != nil {
+				return err
+			}
+		}
+		return client.Publish(t.base+"/settings", settingsPayload(list), true)
+	}
+	settingsTick := time.NewTicker(settingsEvery)
+	defer settingsTick.Stop()
+	settingsSoon := time.NewTimer(time.Hour)
+	settingsSoon.Stop()
+	defer settingsSoon.Stop()
 	publishAvailability := func(v string) error {
 		if v == availability {
 			return nil
@@ -420,9 +475,19 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			return nil // no saved map yet, or unchanged
 		}
 		lastMap = string(img)
+		var card map[string]any
+		if e.get(mctx, "/api/v1/map", &card) == nil {
+			b, _ := json.Marshal(card)
+			if err := client.Publish(t.base+"/map_attributes", string(b), true); err != nil {
+				return err
+			}
+		}
 		return client.Publish(t.base+"/map", lastMap, true)
 	}
 	if err := publishMap(); err != nil {
+		return err
+	}
+	if err := readSettings(); err != nil {
 		return err
 	}
 	for {
@@ -437,12 +502,10 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				err = publishAvailability("offline")
 			} else {
 				// Consumables are known only from the state; announce them once they appear.
-				if names := consumableNames(s.State); strings.Join(names, ",") != announced {
+				if names = consumableNames(s.State); strings.Join(names, ",") != announced {
 					announced = strings.Join(names, ",")
-					for topic, payload := range discovery(t, caps, version, names) {
-						if err = client.Publish(topic, payload, true); err != nil {
-							return err
-						}
+					if err = announce(); err != nil {
+						return err
 					}
 				}
 				if err = client.Publish(t.base+"/state", statePayload(s.State), true); err == nil {
@@ -457,6 +520,10 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				continue // Done() fires next
 			}
 			cmd, err := commandFor(t, msg)
+			if id, ok := settingTopic(t, msg.Topic); ok {
+				cmd, err = settingCommand(settings, id, strings.TrimSpace(msg.Payload))
+				settingsSoon.Reset(3 * time.Second) // show the robot's value, also after a refusal
+			}
 			if err == nil {
 				cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 				err = e.command(cctx, cmd)
@@ -464,6 +531,14 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			}
 			if err != nil {
 				log.Print(err)
+			}
+		case <-settingsTick.C:
+			if err := readSettings(); err != nil {
+				return err
+			}
+		case <-settingsSoon.C:
+			if err := readSettings(); err != nil {
+				return err
 			}
 		case <-mapTick.C:
 			if err := publishMap(); err != nil {
