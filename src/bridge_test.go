@@ -144,12 +144,13 @@ type fakeAgent struct {
 	events   chan string
 	mu       sync.Mutex
 	commands []string
+	history  string      // GET /api/v1/history result
 	light    bool        // camera fill light
 	noCamera atomic.Bool // the camera module is not installed
 }
 
 func newAgent(t *testing.T) *fakeAgent {
-	a := &fakeAgent{events: make(chan string, 4)}
+	a := &fakeAgent{events: make(chan string, 4), history: `[{"start":"2026-11-22T10:00:00Z","result":"docked"}]`}
 	a.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer mod-token" {
 			w.WriteHeader(401)
@@ -193,6 +194,10 @@ func newAgent(t *testing.T) *fakeAgent {
 				`{"id":"drying_time","label":"Время сушки","kind":"number","min":2,"max":12,"step":1,"value":3}]}`)
 		case "/api/v1/map":
 			fmt.Fprint(w, `{"result":{"map_id":2,"calibration_points":[{"vacuum":{"x":0,"y":0},"map":{"x":6,"y":-3}}],"rooms":{"1":{"name":"Кухня","x":0,"y":0}}}}`)
+		case "/api/v1/history":
+			a.mu.Lock()
+			fmt.Fprintf(w, `{"result":%s}`, a.history)
+			a.mu.Unlock()
 		case "/api/v1/map.png":
 			w.Header().Set("Content-Type", "image/png")
 			fmt.Fprint(w, "\x89PNG-test")
@@ -220,6 +225,9 @@ func (a *fakeAgent) last() string {
 }
 
 func TestBridge(t *testing.T) {
+	saved := mapEvery
+	mapEvery = 200 * time.Millisecond // the history is read with the map
+	defer func() { mapEvery = saved }()
 	broker, agent := newBroker(t), newAgent(t)
 	e := env{data: t.TempDir(), api: agent.URL, token: "mod-token", http: &http.Client{}}
 	port := broker.ln.Addr().(*net.TCPAddr).Port
@@ -320,7 +328,8 @@ func TestBridge(t *testing.T) {
 		t.Fatal(st)
 	}
 
-	agent.events <- `{"stale":false,"state":{"activity":"docked","battery":95,"suction":1,"error":0,"error_name":"no_error","status_name":"charging","consumables":{"main_brush":{"left":52,"hours":158}}}}`
+	agent.events <- `{"stale":false,"state":{"activity":"docked","battery":95,"suction":1,"error":0,"error_name":"no_error","status_name":"charging","consumables":{"main_brush":{"left":52,"hours":158}},` +
+		`"volume":80,"charging":1,"station":2,"cleaned_area":12,"cleaning_time":20,"stats":{"area":323,"cleanings":37,"minutes":373},"dnd":{"enabled":false,"start":"22:00","end":"08:00"}}}`
 	waitFor(t, "state", func() bool {
 		v, _ := broker.get("dreame_local/123/state")
 		return strings.Contains(v, `"fan_speed":"Standard"`)
@@ -343,6 +352,30 @@ func TestBridge(t *testing.T) {
 	if v, _ := broker.get("homeassistant/button/dreame_123/reset_main_brush/config"); !strings.Contains(v, `"payload_press":"reset_main_brush"`) || !strings.Contains(v, `"entity_category":"config"`) {
 		t.Fatal("reset button", v)
 	}
+	if v, _ := broker.get("dreame_local/123/state"); !strings.Contains(v, `"station_state":"drying"`) || !strings.Contains(v, `"charging":true`) ||
+		!strings.Contains(v, `"dnd_start":"22:00:00"`) || !strings.Contains(v, `"consumable_hours":{"main_brush":158}`) || !strings.Contains(v, `"totals":{"area":323`) {
+		t.Fatal("state for the new entities", v)
+	}
+	for topic, want := range map[string]string{
+		"homeassistant/sensor/dreame_123/total_cleaned_area/config": `"value_template":"{{ value_json.totals.area }}"`,
+		"homeassistant/binary_sensor/dreame_123/charging/config":    `"device_class":"battery_charging"`,
+		"homeassistant/number/dreame_123/volume/config":             `"command_topic":"dreame_local/123/volume/set"`,
+		"homeassistant/time/dreame_123/dnd_end/config":              `"command_topic":"dreame_local/123/dnd_end/set"`,
+		"homeassistant/event/dreame_123/cleaning/config":            `"event_types":["finished","failed"]`,
+	} {
+		if v, _ := broker.get(topic); !strings.Contains(v, want) {
+			t.Fatal(topic, v)
+		}
+	}
+	// A run that finishes after connecting is an event; the one already in the history is not.
+	agent.mu.Lock()
+	agent.history = `[{"start":"2026-11-23T10:00:00Z","result":"error","error":"bin_full","minutes":5},{"start":"2026-11-22T10:00:00Z","result":"docked"}]`
+	agent.mu.Unlock()
+	waitFor(t, "cleaning event", func() bool {
+		broker.mu.Lock()
+		defer broker.mu.Unlock()
+		return strings.Contains(broker.live["dreame_local/123/cleaning_event"], `"event_type":"failed"`)
+	})
 	waitFor(t, "online", func() bool { v, _ := broker.get("dreame_local/123/availability"); return v == "online" })
 	agent.events <- `{"stale":true,"state":{"activity":"docked"}}`
 	waitFor(t, "offline when stale", func() bool { v, _ := broker.get("dreame_local/123/availability"); return v == "offline" })
@@ -352,6 +385,8 @@ func TestBridge(t *testing.T) {
 		"dreame_local/123/command\x00move_forward":                                                      `{"name":"remote_move","rotation":0,"velocity":200}`,
 		"dreame_local/123/command\x00wash_mop":                                                          `{"name":"wash_mop"}`,
 		"dreame_local/123/command\x00reset_main_brush":                                                  `{"consumable":"main_brush","name":"reset_consumable"}`,
+		"dreame_local/123/volume/set\x0055":                                                             `{"name":"set_volume","value":55}`,
+		"dreame_local/123/dnd_end/set\x0007:30:00":                                                      `{"enabled":false,"end":"07:30","name":"set_dnd","start":"22:00"}`,
 		"dreame_local/123/fan_speed\x00turbo":                                                           `{"name":"set_suction","value":3}`,
 		`dreame_local/123/send_command` + "\x00" + `{"command":"clean_rooms","params":{"rooms":[1,2]}}`: `{"name":"clean_rooms","repeats":1,"rooms":[1,2],"suction":1,"water":2}`,
 		// Home Assistant merges dict params into the top level.

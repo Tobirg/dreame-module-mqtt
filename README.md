@@ -19,10 +19,16 @@
 | Пылесос | старт, пауза, стоп, на базу, найти, мощность (`Silent`, `Standard`, `Strong`, `Turbo`), `vacuum.send_command` |
 | Батарея | заряд, % |
 | Ошибка | название ошибки (`no_error`, `bin_full`, …) |
+| Зарядка | «Charging»: робот на базе и заряжается (до 100 %) |
+| Уборка | «Cleaned area», «Cleaning time» — площадь и время текущей или последней уборки; «Total cleaned area», «Total cleaning time», «Cleaning count» — за всё время, для статистики Home Assistant |
+| Станция | «Station»: `idle`, `washing`, `drying` (другие коды — `code N`) |
+| Громкость | «Volume», 0–100 % |
+| Не беспокоить | «Do not disturb start», «Do not disturb end» — время; включение — переключатель «Не беспокоить» из настроек |
+| Событие «Cleaning» | `finished` или `failed` (уборка закончилась ошибкой) после каждой уборки, с атрибутами `mode`, `result`, `error`, `minutes`, `area`, `start`, `end` — из истории агента, приходит в течение ~15 с после записи. Триггер для автоматизаций |
 | Карта | картинка сохранённой карты со станцией, а во время уборки — с роботом, путём, вымытым полом, убираемой зоной и найденными за эту уборку участками, которых нет на сохранённой карте (агент 0.26+); обновляется каждые 15 с, если изменилась |
 | Камера карты | та же картинка как камера — для карточки карты; атрибуты `calibration_points` и `rooms` с именами, центрами и контурами комнат (агент 0.22+, контуры — 0.22.2+); текст карточки карты — в панели модуля |
 | Настройки | переключатели, списки и числа из раздела «Настройки» панели агента, только те, что есть у робота (агент 0.22+); обновляются раз в 2 минуты и через 3 с после изменения |
-| Расходники | остаток ресурса в % для того, что отдаёт модель (щётки, фильтр, датчики, колёса), и кнопки «Reset …» для сброса после замены или чистки |
+| Расходники | остаток ресурса в % для того, что отдаёт модель (щётки, фильтр, датчики, колёса; атрибут `hours` — наработка), и кнопки «Reset …» для сброса после замены или чистки |
 | Кнопки станции | выгрузка пыли, мойка салфеток, начать и остановить сушку — только если модель робота их поддерживает |
 | Ручное управление | кнопки «Move forward», «Move backward», «Turn left», «Turn right» (агент 0.25+): одно нажатие — короткий шаг, около 14 см или поворот. Первое нажатие сводит робота с базы; через ~15 с после последнего нажатия робот сам выходит из ручного режима, вернуть на базу — «На базу» пылесоса |
 | Камера и «Camera stream» | только если установлен модуль «Камера» (агент 0.26+). Пока переключатель «Camera stream» включён, камера «Camera» получает 2 кадра в секунду с фронтальной камеры робота; через 10 минут переключатель выключается сам. Кадры не сохраняются на брокере. Атрибуты камеры `state` и `reason` говорят, почему кадров нет (например, робот спит на базе). Включите показ в панели модуля «Камера» |
@@ -73,10 +79,12 @@ params: {setting: child_lock, to: true}
 База по умолчанию — `dreame_local/<id робота>`:
 
 - `<база>/attributes` — атрибуты пылесоса для карточки карты (см. выше), retained;
-- `<база>/state` — JSON `{"state", "fan_speed", "battery", "error", "error_name", "station", "status", "consumables"}`, retained;
+- `<база>/state` — JSON `{"state", "fan_speed", "battery", "error", "error_name", "station", "station_state", "status", "consumables", "consumable_hours", "charging", "volume", "cleaned_area", "cleaning_time", "totals", "dnd_start", "dnd_end"}`, retained;
 - `<база>/availability` — `online`/`offline`: робот на связи, агент отвечает, данные свежие. При потере связи с брокером `offline` публикует сам брокер (last will);
 - `<база>/command` — `start`, `pause`, `stop`, `return_to_base`, `locate`, `empty`, `wash_mop`, `dry_start`, `dry_stop`, `move_forward`, `move_backward`, `turn_left`, `turn_right`;
 - `<база>/fan_speed` — скорость из списка выше;
+- `<база>/volume/set` — громкость 0–100; `<база>/dnd_start/set`, `<база>/dnd_end/set` — время `ЧЧ:ММ[:СС]`;
+- `<база>/cleaning_event` — JSON законченной уборки с `event_type`, не retained;
 - `<база>/send_command` — `{"command": "...", "params": {...}}` или параметры на верхнем уровне, как их шлёт Home Assistant; для `clean_zone`, `clean_spot`, `clean_rooms` недостающие `repeats`, `suction`, `water` — 1, текущая мощность, 2;
 - `<база>/settings` — JSON настроек (`ON`/`OFF`, подпись варианта или число), retained;
 - `<база>/setting/<id>/set` — новое значение настройки в том же виде;
@@ -84,7 +92,7 @@ params: {setting: child_lock, to: true}
 - `<база>/camera_live/set` — `ON`/`OFF`, `<база>/camera_live` — состояние, retained; `<база>/camera` — кадр JPEG в base64, не retained; `<база>/camera_status` — `{"state", "reason"}`, retained;
 - `<база>/camera_light/set` — `ON`/`OFF`, `<база>/camera_light` — состояние подсветки, retained.
 
-Автообнаружение: `<префикс>/vacuum|sensor|button|image|camera|switch|select|number/dreame_<id>/.../config`, префикс по умолчанию `homeassistant`.
+Автообнаружение: `<префикс>/vacuum|sensor|binary_sensor|button|image|camera|switch|select|number|time|event/dreame_<id>/.../config`, префикс по умолчанию `homeassistant`.
 
 ## Как устроено
 

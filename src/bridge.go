@@ -232,6 +232,22 @@ var moves = []struct {
 	{"turn_right", "Turn right", "mdi:rotate-right", 0, -60},
 }
 
+// Sensors read from <base>/state; field is the state key.
+var sensors = []struct {
+	id, name, field string
+	extra           map[string]any
+}{
+	{"cleaned_area", "Cleaned area", "cleaned_area", map[string]any{"device_class": "area", "unit_of_measurement": "m²", "state_class": "measurement"}},
+	{"cleaning_time", "Cleaning time", "cleaning_time", map[string]any{"device_class": "duration", "unit_of_measurement": "min", "state_class": "measurement"}},
+	{"total_cleaned_area", "Total cleaned area", "totals.area", map[string]any{"device_class": "area", "unit_of_measurement": "m²", "state_class": "total_increasing", "entity_category": "diagnostic"}},
+	{"total_cleaning_time", "Total cleaning time", "totals.minutes", map[string]any{"device_class": "duration", "unit_of_measurement": "min", "state_class": "total_increasing", "entity_category": "diagnostic"}},
+	{"cleaning_count", "Cleaning count", "totals.cleanings", map[string]any{"state_class": "total_increasing", "entity_category": "diagnostic", "icon": "mdi:counter"}},
+	{"station", "Station", "station_state", map[string]any{"icon": "mdi:home-import-outline"}},
+}
+
+// Station work (4/25) as seen on r2505; other codes show as "code N".
+var stationNames = map[float64]string{0: "idle", 1: "washing", 2: "drying", 5: "washing"}
+
 // Station buttons are announced only when the agent says the model has the hardware.
 var buttons = []struct{ command, name, icon string }{
 	{"empty", "Empty dustbin", "mdi:delete-empty"},
@@ -310,10 +326,33 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 			"json_attributes_topic": t.base + "/map_attributes",
 		}),
 	}
+	for _, s := range sensors {
+		m := map[string]any{"name": s.name, "unique_id": t.node + "_" + s.id, "state_topic": t.base + "/state", "value_template": "{{ value_json." + s.field + " }}"}
+		for k, v := range s.extra {
+			m[k] = v
+		}
+		out[t.discovery+"/sensor/"+t.node+"/"+s.id+"/config"] = common(m)
+	}
+	out[t.discovery+"/binary_sensor/"+t.node+"/charging/config"] = common(map[string]any{
+		"name": "Charging", "unique_id": t.node + "_charging", "state_topic": t.base + "/state", "device_class": "battery_charging",
+		"value_template": "{{ 'ON' if value_json.charging else 'OFF' }}"})
+	out[t.discovery+"/number/"+t.node+"/volume/config"] = common(map[string]any{
+		"name": "Volume", "unique_id": t.node + "_volume", "state_topic": t.base + "/state", "value_template": "{{ value_json.volume }}",
+		"command_topic": t.base + "/volume/set", "min": 0, "max": 100, "step": 1, "unit_of_measurement": "%", "entity_category": "config", "icon": "mdi:volume-high"})
+	for _, w := range []string{"start", "end"} {
+		out[t.discovery+"/time/"+t.node+"/dnd_"+w+"/config"] = common(map[string]any{
+			"name": "Do not disturb " + w, "unique_id": t.node + "_dnd_" + w, "state_topic": t.base + "/state", "value_template": "{{ value_json.dnd_" + w + " }}",
+			"command_topic": t.base + "/dnd_" + w + "/set", "entity_category": "config", "icon": "mdi:minus-circle-outline"})
+	}
+	// A finished run, from the agent's history: an automation trigger with mode, result, minutes and area.
+	out[t.discovery+"/event/"+t.node+"/cleaning/config"] = common(map[string]any{
+		"name": "Cleaning", "unique_id": t.node + "_cleaning", "state_topic": t.base + "/cleaning_event", "event_types": []string{"finished", "failed"},
+		"icon": "mdi:robot-vacuum"})
 	for _, name := range parts {
 		out[t.discovery+"/sensor/"+t.node+"/"+name+"/config"] = common(map[string]any{
 			"name": strings.ReplaceAll(strings.ToUpper(name[:1])+name[1:], "_", " "), "unique_id": t.node + "_" + name,
 			"state_topic": t.base + "/state", "value_template": "{{ value_json.consumables." + name + " }}",
+			"json_attributes_topic": t.base + "/state", "json_attributes_template": "{{ {'hours': value_json.consumable_hours." + name + "} | tojson }}",
 			"unit_of_measurement": "%", "state_class": "measurement", "icon": "mdi:wrench-clock",
 		})
 		// Pressed after replacing or cleaning the part; the agent refuses parts the robot does not report.
@@ -374,6 +413,30 @@ func statePayload(s map[string]any, segments map[string]string) string {
 	if len(segments) > 0 {
 		m["segments"] = segments
 	}
+	m["volume"], m["cleaned_area"], m["cleaning_time"], m["totals"] = s["volume"], s["cleaned_area"], s["cleaning_time"], s["stats"]
+	if c, ok := s["charging"].(float64); ok {
+		battery, _ := s["battery"].(float64)
+		m["charging"] = c == 1 && battery < 100 // 1 is "on the dock", also when full
+	}
+	if v, ok := s["station"].(float64); ok {
+		name, known := stationNames[v]
+		if !known {
+			name = fmt.Sprintf("code %v", v)
+		}
+		m["station_state"] = name
+	}
+	if d, ok := s["dnd"].(map[string]any); ok {
+		m["dnd_start"], m["dnd_end"] = fmt.Sprint(d["start"], ":00"), fmt.Sprint(d["end"], ":00")
+	}
+	if parts, ok := s["consumables"].(map[string]any); ok {
+		hours := map[string]any{}
+		for name, v := range parts {
+			if c, ok := v.(map[string]any); ok {
+				hours[name] = c["hours"]
+			}
+		}
+		m["consumable_hours"] = hours
+	}
 	b, _ := json.Marshal(m)
 	return string(b)
 }
@@ -422,6 +485,10 @@ func commandFor(t topics, msg message, suction int) (map[string]any, error) {
 			}
 			return map[string]any{"name": "clean_rooms", "rooms": rooms, "repeats": 1, "suction": suction, "water": 2}, nil
 		}
+	case t.base + "/volume/set":
+		if n, err := strconv.ParseFloat(payload, 64); err == nil && n >= 0 && n <= 100 {
+			return map[string]any{"name": "set_volume", "value": int(n)}, nil
+		}
 	case t.base + "/fan_speed":
 		for i, f := range fanSpeeds {
 			if strings.EqualFold(f, payload) { // older lower-case names keep working
@@ -468,6 +535,18 @@ func commandFor(t topics, msg message, suction int) (map[string]any, error) {
 }
 
 // integers rounds numbers and numeric strings inside nested lists; anything else is left for the agent to reject.
+// dndCommand changes one end of the do-not-disturb window, keeping the rest as the robot has it.
+func dndCommand(state map[string]any, which, payload string) (map[string]any, error) {
+	d, ok := state["dnd"].(map[string]any)
+	if !ok {
+		return nil, errors.New("do-not-disturb settings not known yet")
+	}
+	clock := strings.TrimSpace(payload)
+	cmd := map[string]any{"name": "set_dnd", "enabled": d["enabled"] == true, "start": d["start"], "end": d["end"]}
+	cmd[which] = clock[:min(5, len(clock))] // Home Assistant sends HH:MM:SS, the agent takes HH:MM
+	return cmd, nil
+}
+
 func integers(v any) any {
 	switch x := v.(type) {
 	case []any:
@@ -559,7 +638,8 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			return err
 		}
 	}
-	subscriptions := []string{t.base + "/command", t.base + "/fan_speed", t.base + "/send_command", t.base + "/setting/+/set", t.base + "/clean_segments", t.base + "/camera_live/set", t.base + "/camera_light/set"}
+	subscriptions := []string{t.base + "/command", t.base + "/fan_speed", t.base + "/send_command", t.base + "/setting/+/set", t.base + "/clean_segments", t.base + "/camera_live/set", t.base + "/camera_light/set",
+		t.base + "/volume/set", t.base + "/dnd_start/set", t.base + "/dnd_end/set"}
 	if err := client.Subscribe(subscriptions...); err != nil {
 		return err
 	}
@@ -591,6 +671,36 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			}
 		}
 		return nil
+	}
+	// Finished runs from the agent's history, published as events; the newest run at connect is only remembered.
+	lastRun, historyRead := "", false
+	checkHistory := func() error {
+		hctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		var runs []map[string]any
+		if e.get(hctx, "/api/v1/history", &runs) != nil {
+			return nil
+		}
+		newest := ""
+		if len(runs) > 0 {
+			newest = fmt.Sprint(runs[0]["start"])
+		}
+		seen := historyRead
+		historyRead = true
+		if newest == lastRun {
+			return nil
+		}
+		lastRun = newest
+		if !seen {
+			return nil
+		}
+		ev := runs[0]
+		ev["event_type"] = "finished"
+		if ev["result"] == "error" {
+			ev["event_type"] = "failed"
+		}
+		b, _ := json.Marshal(ev)
+		return client.Publish(t.base+"/cleaning_event", string(b), false)
 	}
 	var stopLive context.CancelFunc
 	defer func() {
@@ -703,6 +813,9 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 	if err := publishMap(); err != nil {
 		return err
 	}
+	if err := checkHistory(); err != nil {
+		return err
+	}
 	if err := readSettings(); err != nil {
 		return err
 	}
@@ -761,6 +874,9 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				continue
 			}
 			cmd, err := commandFor(t, msg, suction)
+			if w, ok := strings.CutPrefix(msg.Topic, t.base+"/dnd_"); ok && (w == "start/set" || w == "end/set") {
+				cmd, err = dndCommand(state, strings.TrimSuffix(w, "/set"), msg.Payload)
+			}
 			if id, ok := settingTopic(t, msg.Topic); ok {
 				cmd, err = settingCommand(settings, id, strings.TrimSpace(msg.Payload))
 				settingsSoon.Reset(3 * time.Second) // show the robot's value, also after a refusal
@@ -784,6 +900,9 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			}
 		case <-mapTick.C:
 			if err := publishMap(); err != nil {
+				return err
+			}
+			if err := checkHistory(); err != nil {
 				return err
 			}
 		case <-check.C:
