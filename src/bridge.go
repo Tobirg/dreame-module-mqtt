@@ -67,8 +67,15 @@ func (e env) setStatus(state, broker, msg string) {
 
 // ---- agent API
 
-func (e env) get(ctx context.Context, path string, v any) error {
-	req, _ := http.NewRequestWithContext(ctx, "GET", e.api+path, nil)
+func (e env) get(ctx context.Context, path string, v any) error { return e.call(ctx, "GET", path, v) }
+
+// call reads an agent result; POST sends an empty parameter object (module actions).
+func (e env) call(ctx context.Context, method, path string, v any) error {
+	var params io.Reader
+	if method == "POST" {
+		params = strings.NewReader("{}")
+	}
+	req, _ := http.NewRequestWithContext(ctx, method, e.api+path, params)
 	req.Header.Set("Authorization", "Bearer "+e.token)
 	res, err := e.http.Do(req)
 	if err != nil {
@@ -89,6 +96,45 @@ func (e env) get(ctx context.Context, path string, v any) error {
 }
 
 var mapEvery, settingsEvery = 15 * time.Second, 2 * time.Minute
+
+// The camera stream: a frame every cameraEvery while the switch is on, off by itself after cameraFor.
+var cameraEvery, cameraFor = 500 * time.Millisecond, 10 * time.Minute
+
+// cameraLive publishes the camera module's live frames until ctx ends; a timeout turns the switch off.
+func (e env) cameraLive(ctx context.Context, client *mqttClient, t topics) {
+	defer func() {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			_ = client.Publish(t.base+"/camera_live", "OFF", true)
+		}
+	}()
+	tick := time.NewTicker(cameraEvery)
+	defer tick.Stop()
+	last := ""
+	for {
+		var f struct {
+			JPEG   string `json:"jpeg"`
+			State  string `json:"state"`
+			Reason string `json:"reason"`
+		}
+		status := map[string]string{"state": "streaming"}
+		if err := e.call(ctx, "POST", "/api/v1/m/camera/live", &f); err != nil {
+			status = map[string]string{"state": "error", "reason": err.Error()}
+		} else if f.JPEG != "" {
+			_ = client.Publish(t.base+"/camera", f.JPEG, false) // not retained: no picture of the home stays on the broker
+		} else {
+			status = map[string]string{"state": f.State, "reason": f.Reason} // starting, or the robot sleeps
+		}
+		if b, _ := json.Marshal(status); string(b) != last && ctx.Err() == nil {
+			last = string(b)
+			_ = client.Publish(t.base+"/camera_status", last, true)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
 
 // settingTopic returns the setting id of <base>/setting/<id>/set.
 func settingTopic(t topics, topic string) (string, bool) {
@@ -178,6 +224,18 @@ var consumableRe = regexp.MustCompile(`^[a-z_]{1,40}$`)
 // Names xiaomi-vacuum-map-card has icons and translations for (the app calls the first one Quiet).
 var fanSpeeds = []string{"Silent", "Standard", "Strong", "Turbo"}
 
+// Remote control (agent 0.25+): one press is one short move, about 14 cm or a turn step. The first
+// one drives the robot off the dock; it ends remote control by itself about 15 s after the last.
+var moves = []struct {
+	command, name, icon string
+	velocity, rotation  int
+}{
+	{"move_forward", "Move forward", "mdi:arrow-up-bold", 200, 0},
+	{"move_backward", "Move backward", "mdi:arrow-down-bold", -150, 0},
+	{"turn_left", "Turn left", "mdi:rotate-left", 0, 60},
+	{"turn_right", "Turn right", "mdi:rotate-right", 0, -60},
+}
+
 // Station buttons are announced only when the agent says the model has the hardware.
 var buttons = []struct{ command, name, icon string }{
 	{"empty", "Empty dustbin", "mdi:delete-empty"},
@@ -211,7 +269,8 @@ func topicsFor(c config, did string) topics {
 }
 
 // discovery returns retained config messages; an empty payload removes an entity.
-func discovery(t topics, caps capabilities, version string, parts []string, settings []setting) map[string]string {
+// camera: the camera module is installed, so its live view gets a camera entity and an on/off switch.
+func discovery(t topics, caps capabilities, version string, parts []string, settings []setting, camera bool) map[string]string {
 	id := caps.Identity
 	model := id["model"]
 	device := map[string]any{"identifiers": []string{t.node}, "name": "Dreame " + strings.TrimPrefix(model, "dreame.vacuum."),
@@ -277,6 +336,23 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 				"payload_press": b.command, "icon": b.icon})
 		}
 	}
+	for _, m := range moves {
+		topic := t.discovery + "/button/" + t.node + "/" + m.command + "/config"
+		out[topic] = ""
+		if caps.Commands["remote_move"].Available {
+			out[topic] = common(map[string]any{"name": m.name, "unique_id": t.node + "_" + m.command, "command_topic": t.base + "/command",
+				"payload_press": m.command, "icon": m.icon})
+		}
+	}
+	cam, live := t.discovery+"/camera/"+t.node+"/front/config", t.discovery+"/switch/"+t.node+"/camera_live/config"
+	out[cam], out[live] = "", ""
+	if camera {
+		// Frames arrive only while the switch is on: an MQTT camera cannot tell when someone watches.
+		out[cam] = common(map[string]any{"name": "Camera", "unique_id": t.node + "_camera", "topic": t.base + "/camera", "image_encoding": "b64",
+			"json_attributes_topic": t.base + "/camera_status"})
+		out[live] = common(map[string]any{"name": "Camera stream", "unique_id": t.node + "_camera_live", "command_topic": t.base + "/camera_live/set",
+			"state_topic": t.base + "/camera_live", "icon": "mdi:cctv"})
+	}
 	return out
 }
 
@@ -323,6 +399,11 @@ func commandFor(t topics, msg message, suction int) (map[string]any, error) {
 		}
 		if name, ok := names[payload]; ok {
 			return map[string]any{"name": name}, nil
+		}
+		for _, m := range moves {
+			if payload == m.command {
+				return map[string]any{"name": "remote_move", "velocity": m.velocity, "rotation": m.rotation}, nil
+			}
 		}
 		if part, ok := strings.CutPrefix(payload, "reset_"); ok && consumableRe.MatchString(part) {
 			return map[string]any{"name": "reset_consumable", "consumable": part}, nil
@@ -461,12 +542,20 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		return err
 	}
 	defer client.Close()
-	for topic, payload := range discovery(t, caps, version, nil, nil) {
+	// Camera entities only while the camera module is installed (and its status answers).
+	hasCamera := func() bool {
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		var st map[string]any
+		return e.call(cctx, "POST", "/api/v1/m/camera/status", &st) == nil
+	}
+	camera := hasCamera()
+	for topic, payload := range discovery(t, caps, version, nil, nil, camera) {
 		if err := client.Publish(topic, payload, true); err != nil {
 			return err
 		}
 	}
-	subscriptions := []string{t.base + "/command", t.base + "/fan_speed", t.base + "/send_command", t.base + "/setting/+/set", t.base + "/clean_segments"}
+	subscriptions := []string{t.base + "/command", t.base + "/fan_speed", t.base + "/send_command", t.base + "/setting/+/set", t.base + "/clean_segments", t.base + "/camera_live/set"}
 	if err := client.Subscribe(subscriptions...); err != nil {
 		return err
 	}
@@ -492,7 +581,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		return client.Publish(t.base+"/attributes", a, true)
 	}
 	announce := func() error {
-		for topic, payload := range discovery(t, caps, version, names, settings) {
+		for topic, payload := range discovery(t, caps, version, names, settings, camera) {
 			if err := client.Publish(topic, payload, true); err != nil {
 				return err
 			}
@@ -510,6 +599,9 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		}
 		settings = list
 		ids := []string{}
+		if camera = hasCamera(); camera {
+			ids = append(ids, "+camera") // installing or removing the camera module re-announces
+		}
 		for _, s := range list {
 			ids = append(ids, s.ID)
 		}
@@ -566,6 +658,28 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		}
 		return client.Publish(t.base+"/map", lastMap, true)
 	}
+	var stopLive context.CancelFunc
+	defer func() {
+		if stopLive != nil {
+			stopLive()
+		}
+	}()
+	setLive := func(on bool) error {
+		if stopLive != nil {
+			stopLive()
+			stopLive = nil
+		}
+		state := "OFF"
+		if on && camera {
+			lctx, cancel := context.WithTimeout(sctx, cameraFor)
+			stopLive, state = cancel, "ON"
+			go e.cameraLive(lctx, client, t)
+		}
+		return client.Publish(t.base+"/camera_live", state, true)
+	}
+	if err := setLive(false); err != nil {
+		return err
+	}
 	if err := publishMap(); err != nil {
 		return err
 	}
@@ -607,6 +721,12 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		case msg, ok := <-client.Messages:
 			if !ok {
 				continue // Done() fires next
+			}
+			if msg.Topic == t.base+"/camera_live/set" {
+				if err := setLive(strings.EqualFold(strings.TrimSpace(msg.Payload), "ON")); err != nil {
+					return err
+				}
+				continue
 			}
 			cmd, err := commandFor(t, msg, suction)
 			if id, ok := settingTopic(t, msg.Topic); ok {

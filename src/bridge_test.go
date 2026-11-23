@@ -19,7 +19,8 @@ type fakeBroker struct {
 	ln       net.Listener
 	mu       sync.Mutex
 	retained map[string]string
-	connects []string // "user:password will=topic"
+	live     map[string]string // the newest non-retained publish of each topic
+	connects []string          // "user:password will=topic"
 	conns    []net.Conn
 	subs     []string
 }
@@ -29,7 +30,7 @@ func newBroker(t *testing.T) *fakeBroker {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &fakeBroker{ln: ln, retained: map[string]string{}}
+	b := &fakeBroker{ln: ln, retained: map[string]string{}, live: map[string]string{}}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -86,11 +87,13 @@ func (b *fakeBroker) serve(c net.Conn) {
 			c.Write([]byte{0x20, 2, 0, code})
 		case 0x30:
 			topic, payload := str(body)
+			b.mu.Lock()
 			if kind&1 == 1 {
-				b.mu.Lock()
 				b.retained[topic] = string(payload)
-				b.mu.Unlock()
+			} else {
+				b.live[topic] = string(payload)
 			}
+			b.mu.Unlock()
 		case 0x80:
 			rest := body[2:]
 			for len(rest) > 0 {
@@ -151,7 +154,11 @@ func newAgent(t *testing.T) *fakeAgent {
 		}
 		switch r.URL.Path {
 		case "/api/v1/capabilities":
-			fmt.Fprint(w, `{"result":{"identity":{"model":"dreame.vacuum.r2505","did":"123","fw_ver":"4.3.9_2021"},"commands":{"empty":{"available":true},"wash_mop":{"available":true},"dry_start":{"available":false}}}}`)
+			fmt.Fprint(w, `{"result":{"identity":{"model":"dreame.vacuum.r2505","did":"123","fw_ver":"4.3.9_2021"},"commands":{"empty":{"available":true},"wash_mop":{"available":true},"dry_start":{"available":false},"remote_move":{"available":true}}}}`)
+		case "/api/v1/m/camera/status":
+			fmt.Fprint(w, `{"result":{"enabled":true}}`)
+		case "/api/v1/m/camera/live":
+			fmt.Fprint(w, `{"result":{"at":1,"jpeg":"/9j/frame"}}`)
 		case "/api/v1/events":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.(http.Flusher).Flush()
@@ -254,6 +261,29 @@ func TestBridge(t *testing.T) {
 	if v, ok := broker.get("homeassistant/button/dreame_123/dry_start/config"); !ok || v != "" {
 		t.Fatal("unavailable command must clear its button", v, ok)
 	}
+	if v, _ := broker.get("homeassistant/button/dreame_123/turn_left/config"); !strings.Contains(v, `"payload_press":"turn_left"`) {
+		t.Fatal("remote control button", v)
+	}
+	if v, _ := broker.get("homeassistant/camera/dreame_123/front/config"); !strings.Contains(v, `"image_encoding":"b64"`) {
+		t.Fatal("camera entity", v)
+	}
+	if v, _ := broker.get("dreame_local/123/camera_live"); v != "OFF" {
+		t.Fatal("camera stream starts off", v)
+	}
+	broker.send("dreame_local/123/camera_live/set", "ON")
+	waitFor(t, "camera frame", func() bool {
+		broker.mu.Lock()
+		defer broker.mu.Unlock()
+		return broker.live["dreame_local/123/camera"] == "/9j/frame"
+	})
+	if v, _ := broker.get("dreame_local/123/camera_live"); v != "ON" {
+		t.Fatal("camera stream switch", v)
+	}
+	if _, ok := broker.get("dreame_local/123/camera"); ok {
+		t.Fatal("camera frames must not be retained")
+	}
+	broker.send("dreame_local/123/camera_live/set", "OFF")
+	waitFor(t, "camera off", func() bool { v, _ := broker.get("dreame_local/123/camera_live"); return v == "OFF" })
 	if st := e.status()["connection"].(map[string]any); st["state"] != "connected" {
 		t.Fatal(st)
 	}
@@ -287,6 +317,7 @@ func TestBridge(t *testing.T) {
 
 	for topic, want := range map[string]string{
 		"dreame_local/123/command\x00return_to_base":                                                    `{"name":"dock"}`,
+		"dreame_local/123/command\x00move_forward":                                                      `{"name":"remote_move","rotation":0,"velocity":200}`,
 		"dreame_local/123/command\x00wash_mop":                                                          `{"name":"wash_mop"}`,
 		"dreame_local/123/command\x00reset_main_brush":                                                  `{"consumable":"main_brush","name":"reset_consumable"}`,
 		"dreame_local/123/fan_speed\x00turbo":                                                           `{"name":"set_suction","value":3}`,
@@ -365,5 +396,14 @@ func TestVacuumAttributes(t *testing.T) {
 		`"status":"charging","tight_mopping":"false","total_cleaned_area":310,"total_cleaning_time":360,"wetness_level":12}`
 	if got := vacuumAttributes(state, settings); got != want {
 		t.Fatal(got)
+	}
+}
+
+func TestNoCameraWithoutCameraModule(t *testing.T) {
+	d := discovery(topicsFor(config{}, "1"), capabilities{}, "x", nil, nil, false)
+	for _, topic := range []string{"homeassistant/camera/dreame_1/front/config", "homeassistant/switch/dreame_1/camera_live/config", "homeassistant/button/dreame_1/move_forward/config"} {
+		if v, ok := d[topic]; !ok || v != "" {
+			t.Errorf("%s must be cleared, got %q", topic, v)
+		}
 	}
 }
