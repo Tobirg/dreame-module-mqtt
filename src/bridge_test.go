@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,6 +144,8 @@ type fakeAgent struct {
 	events   chan string
 	mu       sync.Mutex
 	commands []string
+	light    bool        // camera fill light
+	noCamera atomic.Bool // the camera module is not installed
 }
 
 func newAgent(t *testing.T) *fakeAgent {
@@ -155,8 +158,20 @@ func newAgent(t *testing.T) *fakeAgent {
 		switch r.URL.Path {
 		case "/api/v1/capabilities":
 			fmt.Fprint(w, `{"result":{"identity":{"model":"dreame.vacuum.r2505","did":"123","fw_ver":"4.3.9_2021"},"commands":{"empty":{"available":true},"wash_mop":{"available":true},"dry_start":{"available":false},"remote_move":{"available":true}}}}`)
-		case "/api/v1/m/camera/status":
-			fmt.Fprint(w, `{"result":{"enabled":true}}`)
+		case "/api/v1/m/camera/status", "/api/v1/m/camera/light":
+			if a.noCamera.Load() {
+				w.WriteHeader(404)
+				fmt.Fprint(w, `{"error":"no such module"}`)
+				return
+			}
+			var p struct{ On *bool }
+			_ = json.NewDecoder(r.Body).Decode(&p)
+			a.mu.Lock()
+			if p.On != nil {
+				a.light = *p.On
+			}
+			fmt.Fprintf(w, `{"result":{"enabled":true,"light":%v}}`, a.light)
+			a.mu.Unlock()
 		case "/api/v1/m/camera/live":
 			fmt.Fprint(w, `{"result":{"at":1,"jpeg":"/9j/frame"}}`)
 		case "/api/v1/events":
@@ -284,6 +299,23 @@ func TestBridge(t *testing.T) {
 	}
 	broker.send("dreame_local/123/camera_live/set", "OFF")
 	waitFor(t, "camera off", func() bool { v, _ := broker.get("dreame_local/123/camera_live"); return v == "OFF" })
+	if v, _ := broker.get("homeassistant/switch/dreame_123/camera_light/config"); !strings.Contains(v, `"command_topic":"dreame_local/123/camera_light/set"`) {
+		t.Fatal("camera light switch", v)
+	}
+	if v, _ := broker.get("dreame_local/123/camera_light"); v != "OFF" {
+		t.Fatal("camera light state", v)
+	}
+	broker.send("dreame_local/123/camera_light/set", "ON")
+	waitFor(t, "light on", func() bool { v, _ := broker.get("dreame_local/123/camera_light"); return v == "ON" })
+	// Removing the camera module stops a running stream and its entities.
+	broker.send("dreame_local/123/camera_live/set", "ON")
+	waitFor(t, "camera on", func() bool { v, _ := broker.get("dreame_local/123/camera_live"); return v == "ON" })
+	agent.noCamera.Store(true)
+	broker.send("dreame_local/123/setting/child_lock/set", "ON") // settings, and the camera, are read again 3 s later
+	waitFor(t, "stream off without the module", func() bool { v, _ := broker.get("dreame_local/123/camera_live"); return v == "OFF" })
+	if v, _ := broker.get("homeassistant/switch/dreame_123/camera_light/config"); v != "" {
+		t.Fatal("light switch must go with the module", v)
+	}
 	if st := e.status()["connection"].(map[string]any); st["state"] != "connected" {
 		t.Fatal(st)
 	}
@@ -400,8 +432,8 @@ func TestVacuumAttributes(t *testing.T) {
 }
 
 func TestNoCameraWithoutCameraModule(t *testing.T) {
-	d := discovery(topicsFor(config{}, "1"), capabilities{}, "x", nil, nil, false)
-	for _, topic := range []string{"homeassistant/camera/dreame_1/front/config", "homeassistant/switch/dreame_1/camera_live/config", "homeassistant/button/dreame_1/move_forward/config"} {
+	d := discovery(topicsFor(config{}, "1"), capabilities{}, "x", nil, nil, false, true)
+	for _, topic := range []string{"homeassistant/camera/dreame_1/front/config", "homeassistant/switch/dreame_1/camera_live/config", "homeassistant/switch/dreame_1/camera_light/config", "homeassistant/button/dreame_1/move_forward/config"} {
 		if v, ok := d[topic]; !ok || v != "" {
 			t.Errorf("%s must be cleared, got %q", topic, v)
 		}

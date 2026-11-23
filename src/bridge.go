@@ -67,32 +67,46 @@ func (e env) setStatus(state, broker, msg string) {
 
 // ---- agent API
 
-func (e env) get(ctx context.Context, path string, v any) error { return e.call(ctx, "GET", path, v) }
+func (e env) get(ctx context.Context, path string, v any) error {
+	return e.call(ctx, "GET", path, nil, v)
+}
 
-// call reads an agent result; POST sends an empty parameter object (module actions).
-func (e env) call(ctx context.Context, method, path string, v any) error {
-	var params io.Reader
-	if method == "POST" {
-		params = strings.NewReader("{}")
+// post sends params (an empty object when nil) and reads the result into v, if not nil.
+func (e env) post(ctx context.Context, path string, params, v any) error {
+	if params == nil {
+		params = map[string]any{}
 	}
-	req, _ := http.NewRequestWithContext(ctx, method, e.api+path, params)
+	return e.call(ctx, "POST", path, params, v)
+}
+
+func (e env) call(ctx context.Context, method, path string, params, v any) error {
+	var body io.Reader
+	if params != nil {
+		b, _ := json.Marshal(params)
+		body = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequestWithContext(ctx, method, e.api+path, body)
 	req.Header.Set("Authorization", "Bearer "+e.token)
+	req.Header.Set("Content-Type", "application/json")
 	res, err := e.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	var body struct {
+	var out struct {
 		Result json.RawMessage `json:"result"`
 		Error  string          `json:"error"`
 	}
-	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&out); err != nil && res.StatusCode == 200 {
 		return err
 	}
 	if res.StatusCode != 200 {
-		return fmt.Errorf("agent: %s", body.Error)
+		return fmt.Errorf("agent refused %s: %s", path, out.Error)
 	}
-	return json.Unmarshal(body.Result, v)
+	if v == nil {
+		return nil
+	}
+	return json.Unmarshal(out.Result, v)
 }
 
 var mapEvery, settingsEvery = 15 * time.Second, 2 * time.Minute
@@ -117,7 +131,7 @@ func (e env) cameraLive(ctx context.Context, client *mqttClient, t topics) {
 			Reason string `json:"reason"`
 		}
 		status := map[string]string{"state": "streaming"}
-		if err := e.call(ctx, "POST", "/api/v1/m/camera/live", &f); err != nil {
+		if err := e.post(ctx, "/api/v1/m/camera/live", nil, &f); err != nil {
 			status = map[string]string{"state": "error", "reason": err.Error()}
 		} else if f.JPEG != "" {
 			_ = client.Publish(t.base+"/camera", f.JPEG, false) // not retained: no picture of the home stays on the broker
@@ -158,24 +172,6 @@ func (e env) raw(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("agent %s: HTTP %d", path, res.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(res.Body, 4<<20))
-}
-
-func (e env) command(ctx context.Context, cmd map[string]any) error {
-	b, _ := json.Marshal(cmd)
-	req, _ := http.NewRequestWithContext(ctx, "POST", e.api+"/api/v1/command", bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer "+e.token)
-	req.Header.Set("Content-Type", "application/json")
-	res, err := e.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		var body struct{ Error string }
-		_ = json.NewDecoder(io.LimitReader(res.Body, 65536)).Decode(&body)
-		return fmt.Errorf("agent refused %v: %s", cmd["name"], body.Error)
-	}
-	return nil
 }
 
 type snapshot struct {
@@ -269,8 +265,9 @@ func topicsFor(c config, did string) topics {
 }
 
 // discovery returns retained config messages; an empty payload removes an entity.
-// camera: the camera module is installed, so its live view gets a camera entity and an on/off switch.
-func discovery(t topics, caps capabilities, version string, parts []string, settings []setting, camera bool) map[string]string {
+// camera: the camera module is installed, so its live view gets a camera entity and an on/off switch;
+// light: it also has the fill light (camera 1.4+).
+func discovery(t topics, caps capabilities, version string, parts []string, settings []setting, camera, light bool) map[string]string {
 	id := caps.Identity
 	model := id["model"]
 	device := map[string]any{"identifiers": []string{t.node}, "name": "Dreame " + strings.TrimPrefix(model, "dreame.vacuum."),
@@ -344,8 +341,12 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 				"payload_press": m.command, "icon": m.icon})
 		}
 	}
-	cam, live := t.discovery+"/camera/"+t.node+"/front/config", t.discovery+"/switch/"+t.node+"/camera_live/config"
-	out[cam], out[live] = "", ""
+	cam, live, lamp := t.discovery+"/camera/"+t.node+"/front/config", t.discovery+"/switch/"+t.node+"/camera_live/config", t.discovery+"/switch/"+t.node+"/camera_light/config"
+	out[cam], out[live], out[lamp] = "", "", ""
+	if camera && light {
+		out[lamp] = common(map[string]any{"name": "Camera light", "unique_id": t.node + "_camera_light", "command_topic": t.base + "/camera_light/set",
+			"state_topic": t.base + "/camera_light", "icon": "mdi:flashlight"})
+	}
 	if camera {
 		// Frames arrive only while the switch is on: an MQTT camera cannot tell when someone watches.
 		out[cam] = common(map[string]any{"name": "Camera", "unique_id": t.node + "_camera", "topic": t.base + "/camera", "image_encoding": "b64",
@@ -543,19 +544,22 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 	}
 	defer client.Close()
 	// Camera entities only while the camera module is installed (and its status answers).
+	var cam struct {
+		Light *bool `json:"light"` // camera 1.4+
+	}
 	hasCamera := func() bool {
 		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		var st map[string]any
-		return e.call(cctx, "POST", "/api/v1/m/camera/status", &st) == nil
+		cam.Light = nil
+		return e.post(cctx, "/api/v1/m/camera/status", nil, &cam) == nil
 	}
 	camera := hasCamera()
-	for topic, payload := range discovery(t, caps, version, nil, nil, camera) {
+	for topic, payload := range discovery(t, caps, version, nil, nil, camera, cam.Light != nil) {
 		if err := client.Publish(topic, payload, true); err != nil {
 			return err
 		}
 	}
-	subscriptions := []string{t.base + "/command", t.base + "/fan_speed", t.base + "/send_command", t.base + "/setting/+/set", t.base + "/clean_segments", t.base + "/camera_live/set"}
+	subscriptions := []string{t.base + "/command", t.base + "/fan_speed", t.base + "/send_command", t.base + "/setting/+/set", t.base + "/clean_segments", t.base + "/camera_live/set", t.base + "/camera_light/set"}
 	if err := client.Subscribe(subscriptions...); err != nil {
 		return err
 	}
@@ -581,12 +585,37 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		return client.Publish(t.base+"/attributes", a, true)
 	}
 	announce := func() error {
-		for topic, payload := range discovery(t, caps, version, names, settings, camera) {
+		for topic, payload := range discovery(t, caps, version, names, settings, camera, cam.Light != nil) {
 			if err := client.Publish(topic, payload, true); err != nil {
 				return err
 			}
 		}
 		return nil
+	}
+	var stopLive context.CancelFunc
+	defer func() {
+		if stopLive != nil {
+			stopLive()
+		}
+	}()
+	setLive := func(on bool) error {
+		if stopLive != nil {
+			stopLive()
+			stopLive = nil
+		}
+		state := "OFF"
+		if on && camera {
+			lctx, cancel := context.WithTimeout(sctx, cameraFor)
+			stopLive, state = cancel, "ON"
+			go e.cameraLive(lctx, client, t)
+		}
+		return client.Publish(t.base+"/camera_live", state, true)
+	}
+	publishLight := func() error {
+		if cam.Light == nil {
+			return nil
+		}
+		return client.Publish(t.base+"/camera_light", map[bool]string{true: "ON", false: "OFF"}[*cam.Light], true)
 	}
 	// Settings come from the agent (0.22+); an older agent just has none.
 	settingsKey := ""
@@ -601,6 +630,16 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		ids := []string{}
 		if camera = hasCamera(); camera {
 			ids = append(ids, "+camera") // installing or removing the camera module re-announces
+			if cam.Light != nil {
+				ids = append(ids, "+light")
+			}
+		} else if stopLive != nil {
+			if err := setLive(false); err != nil { // the module was removed while streaming
+				return err
+			}
+		}
+		if err := publishLight(); err != nil {
+			return err
 		}
 		for _, s := range list {
 			ids = append(ids, s.ID)
@@ -658,25 +697,6 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		}
 		return client.Publish(t.base+"/map", lastMap, true)
 	}
-	var stopLive context.CancelFunc
-	defer func() {
-		if stopLive != nil {
-			stopLive()
-		}
-	}()
-	setLive := func(on bool) error {
-		if stopLive != nil {
-			stopLive()
-			stopLive = nil
-		}
-		state := "OFF"
-		if on && camera {
-			lctx, cancel := context.WithTimeout(sctx, cameraFor)
-			stopLive, state = cancel, "ON"
-			go e.cameraLive(lctx, client, t)
-		}
-		return client.Publish(t.base+"/camera_live", state, true)
-	}
 	if err := setLive(false); err != nil {
 		return err
 	}
@@ -722,6 +742,18 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			if !ok {
 				continue // Done() fires next
 			}
+			if msg.Topic == t.base+"/camera_light/set" {
+				lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				err := e.post(lctx, "/api/v1/m/camera/light", map[string]any{"on": strings.EqualFold(strings.TrimSpace(msg.Payload), "ON")}, &cam)
+				cancel()
+				if err != nil {
+					log.Printf("camera light: %v", err)
+				}
+				if err := publishLight(); err != nil { // the module's value, also after a refusal
+					return err
+				}
+				continue
+			}
 			if msg.Topic == t.base+"/camera_live/set" {
 				if err := setLive(strings.EqualFold(strings.TrimSpace(msg.Payload), "ON")); err != nil {
 					return err
@@ -736,7 +768,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 			if err == nil {
 				log.Printf("command %v from %s", cmd["name"], strings.TrimPrefix(msg.Topic, t.base+"/"))
 				cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-				err = e.command(cctx, cmd)
+				err = e.post(cctx, "/api/v1/command", cmd, nil)
 				cancel()
 			}
 			if err != nil {
