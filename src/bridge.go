@@ -333,6 +333,10 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 		}
 		out[t.discovery+"/sensor/"+t.node+"/"+s.id+"/config"] = common(m)
 	}
+	// The robot stopped on an error; the Error sensor also shows warnings while it works normally.
+	out[t.discovery+"/binary_sensor/"+t.node+"/problem/config"] = common(map[string]any{
+		"name": "Problem", "unique_id": t.node + "_problem", "state_topic": t.base + "/state", "device_class": "problem",
+		"value_template": "{{ 'ON' if value_json.state == 'error' else 'OFF' }}"})
 	out[t.discovery+"/binary_sensor/"+t.node+"/charging/config"] = common(map[string]any{
 		"name": "Charging", "unique_id": t.node + "_charging", "state_topic": t.base + "/state", "device_class": "battery_charging",
 		"value_template": "{{ 'ON' if value_json.charging else 'OFF' }}"})
@@ -383,7 +387,7 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 	cam, live, lamp := t.discovery+"/camera/"+t.node+"/front/config", t.discovery+"/switch/"+t.node+"/camera_live/config", t.discovery+"/switch/"+t.node+"/camera_light/config"
 	out[cam], out[live], out[lamp] = "", "", ""
 	if camera && light {
-		out[lamp] = common(map[string]any{"name": "Camera light", "unique_id": t.node + "_camera_light", "command_topic": t.base + "/camera_light/set",
+		out[lamp] = common(map[string]any{"name": "Live view light", "unique_id": t.node + "_camera_light", "command_topic": t.base + "/camera_light/set",
 			"state_topic": t.base + "/camera_light", "icon": "mdi:flashlight"})
 	}
 	if camera {

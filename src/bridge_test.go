@@ -359,6 +359,7 @@ func TestBridge(t *testing.T) {
 	for topic, want := range map[string]string{
 		"homeassistant/sensor/dreame_123/total_cleaned_area/config": `"value_template":"{{ value_json.totals.area }}"`,
 		"homeassistant/binary_sensor/dreame_123/charging/config":    `"device_class":"battery_charging"`,
+		"homeassistant/binary_sensor/dreame_123/problem/config":     `"device_class":"problem"`,
 		"homeassistant/number/dreame_123/volume/config":             `"command_topic":"dreame_local/123/volume/set"`,
 		"homeassistant/time/dreame_123/dnd_end/config":              `"command_topic":"dreame_local/123/dnd_end/set"`,
 		"homeassistant/event/dreame_123/cleaning/config":            `"event_types":["finished","failed"]`,
@@ -472,5 +473,16 @@ func TestNoCameraWithoutCameraModule(t *testing.T) {
 		if v, ok := d[topic]; !ok || v != "" {
 			t.Errorf("%s must be cleared, got %q", topic, v)
 		}
+	}
+}
+
+func TestSettingNamesAndHidden(t *testing.T) {
+	common := func(m map[string]any) string { b, _ := json.Marshal(m); return string(b) }
+	d := settingDiscovery(topicsFor(config{}, "1"), common, []setting{{ID: "lds_state", Label: "LDS", Kind: "bool"}, {ID: "fill_light", Label: "Подсветка камеры", Kind: "bool"}})
+	if v := d["homeassistant/switch/dreame_1/setting_lds_state/config"]; !strings.Contains(v, `"enabled_by_default":false`) {
+		t.Fatal("service setting must start disabled", v)
+	}
+	if v := d["homeassistant/switch/dreame_1/setting_fill_light/config"]; !strings.Contains(v, `"name":"Подсветка в темноте (для ИИ)"`) || strings.Contains(v, "enabled_by_default") {
+		t.Fatal("fill light", v)
 	}
 }

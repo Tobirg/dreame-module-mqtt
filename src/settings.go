@@ -27,6 +27,14 @@ type setting struct {
 
 var settingIDRe = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
+// Service and cloud-only settings: announced, but disabled until enabled in Home Assistant
+// (applies when Home Assistant first creates the entity).
+var hiddenSettings = map[string]bool{"lds_state": true, "auto_lds_coverage": true, "streaming_voice_prompt": true, "voice_assistant_language": true,
+	"human_follow": true, "ai_bit_ai_obstacle_image_upload": true, "ai_json_ai_obstacle_image_upload": true}
+
+// Clearer names than the catalog's where two entities would read alike.
+var settingNames = map[string]string{"fill_light": "Подсветка в темноте (для ИИ)"}
+
 // settingDiscovery announces each setting as a switch, select or number under the device.
 func settingDiscovery(t topics, common func(map[string]any) string, list []setting) map[string]string {
 	out := map[string]string{}
@@ -34,9 +42,16 @@ func settingDiscovery(t topics, common func(map[string]any) string, list []setti
 		if !settingIDRe.MatchString(s.ID) {
 			continue
 		}
-		m := map[string]any{"name": s.Label, "unique_id": t.node + "_setting_" + s.ID, "entity_category": "config",
+		name := s.Label
+		if n, ok := settingNames[s.ID]; ok {
+			name = n
+		}
+		m := map[string]any{"name": name, "unique_id": t.node + "_setting_" + s.ID, "entity_category": "config",
 			"state_topic": t.base + "/settings", "value_template": "{{ value_json." + s.ID + " }}",
 			"command_topic": t.base + "/setting/" + s.ID + "/set"}
+		if hiddenSettings[s.ID] {
+			m["enabled_by_default"] = false
+		}
 		component := "switch"
 		switch s.Kind {
 		case "bool":
