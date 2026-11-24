@@ -147,10 +147,18 @@ type fakeAgent struct {
 	history  string      // GET /api/v1/history result
 	light    bool        // camera fill light
 	noCamera atomic.Bool // the camera module is not installed
+	caps     string      // GET /api/v1/capabilities commands
+	settings string      // GET /api/v1/settings result
 }
 
 func newAgent(t *testing.T) *fakeAgent {
-	a := &fakeAgent{events: make(chan string, 4), history: `[{"start":"2026-11-22T10:00:00Z","result":"docked"}]`}
+	a := &fakeAgent{events: make(chan string, 4), history: `[{"start":"2026-11-22T10:00:00Z","result":"docked"}]`,
+		caps: `{"empty":{"available":true,"button":{"label":"Выгрузить пыль","icon":"mdi:delete-empty"}},"wash_mop":{"available":true,"button":{"label":"Мыть салфетки","icon":"mdi:water"}},` +
+			`"dry_start":{"available":false,"button":{"label":"Начать сушку","icon":"mdi:fan"}},"clean_rooms":{"available":true},"remote_move":{"available":true}}`,
+		settings: `[{"id":"child_lock","label":"Блокировка от детей","kind":"bool","value":0},` +
+			`{"id":"cleaning_mode","label":"Режим уборки","kind":"select","options":[{"value":0,"label":"Сухая уборка"},{"value":2,"label":"Сухая и Влажная Уборка"}],"value":2},` +
+			`{"id":"mop_pad_swing","label":"Покачивание швабры","kind":"select","auto":"MopScalable","options":[{"value":0,"label":"Выключено"},{"value":1,"label":"Авто"}],"value":-1},` +
+			`{"id":"drying_time","label":"Время сушки","kind":"number","min":2,"max":12,"step":1,"value":3}]`}
 	a.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer mod-token" {
 			w.WriteHeader(401)
@@ -158,7 +166,9 @@ func newAgent(t *testing.T) *fakeAgent {
 		}
 		switch r.URL.Path {
 		case "/api/v1/capabilities":
-			fmt.Fprint(w, `{"result":{"identity":{"model":"dreame.vacuum.r2505","did":"123","fw_ver":"4.3.9_2021"},"commands":{"empty":{"available":true},"wash_mop":{"available":true},"dry_start":{"available":false},"remote_move":{"available":true}}}}`)
+			a.mu.Lock()
+			fmt.Fprintf(w, `{"result":{"identity":{"model":"dreame.vacuum.r2505","did":"123","fw_ver":"4.3.9_2021"},"commands":%s}}`, a.caps)
+			a.mu.Unlock()
 		case "/api/v1/m/camera/status", "/api/v1/m/camera/light":
 			if a.noCamera.Load() {
 				w.WriteHeader(404)
@@ -188,10 +198,9 @@ func newAgent(t *testing.T) *fakeAgent {
 				}
 			}
 		case "/api/v1/settings":
-			fmt.Fprint(w, `{"result":[{"id":"child_lock","label":"Блокировка от детей","kind":"bool","value":0},`+
-				`{"id":"cleaning_mode","label":"Режим уборки","kind":"select","options":[{"value":0,"label":"Сухая уборка"},{"value":2,"label":"Сухая и Влажная Уборка"}],"value":2},`+
-				`{"id":"mop_pad_swing","label":"Покачивание швабры","kind":"select","auto":"MopScalable","options":[{"value":0,"label":"Выключено"},{"value":1,"label":"Авто"}],"value":-1},`+
-				`{"id":"drying_time","label":"Время сушки","kind":"number","min":2,"max":12,"step":1,"value":3}]}`)
+			a.mu.Lock()
+			fmt.Fprintf(w, `{"result":%s}`, a.settings)
+			a.mu.Unlock()
 		case "/api/v1/map":
 			fmt.Fprint(w, `{"result":{"map_id":2,"calibration_points":[{"vacuum":{"x":0,"y":0},"map":{"x":6,"y":-3}}],"rooms":{"1":{"name":"Кухня","x":0,"y":0}}}}`)
 		case "/api/v1/history":
@@ -225,9 +234,9 @@ func (a *fakeAgent) last() string {
 }
 
 func TestBridge(t *testing.T) {
-	saved := mapEvery
-	mapEvery = 200 * time.Millisecond // the history is read with the map
-	defer func() { mapEvery = saved }()
+	saved, savedSettings := mapEvery, settingsEvery
+	mapEvery, settingsEvery = 200*time.Millisecond, 300*time.Millisecond // the history is read with the map
+	defer func() { mapEvery, settingsEvery = saved, savedSettings }()
 	broker, agent := newBroker(t), newAgent(t)
 	e := env{data: t.TempDir(), api: agent.URL, token: "mod-token", http: &http.Client{}}
 	port := broker.ln.Addr().(*net.TCPAddr).Port
@@ -278,11 +287,14 @@ func TestBridge(t *testing.T) {
 	if cfg["command_topic"] != "dreame_local/123/command" || cfg["device"].(map[string]any)["model"] != "dreame.vacuum.r2505" {
 		t.Fatal(vac)
 	}
-	if v, _ := broker.get("homeassistant/button/dreame_123/empty/config"); !strings.Contains(v, `"payload_press":"empty"`) {
+	if v, _ := broker.get("homeassistant/button/dreame_123/empty/config"); !strings.Contains(v, `"payload_press":"empty"`) || !strings.Contains(v, `"name":"Выгрузить пыль"`) {
 		t.Fatal("station button missing", v)
 	}
-	if v, ok := broker.get("homeassistant/button/dreame_123/dry_start/config"); !ok || v != "" {
-		t.Fatal("unavailable command must clear its button", v, ok)
+	if v, _ := broker.get("homeassistant/button/dreame_123/dry_start/config"); v != "" {
+		t.Fatal("unavailable command must have no button", v)
+	}
+	if _, ok := broker.get("homeassistant/button/dreame_123/clean_rooms/config"); ok {
+		t.Fatal("commands with parameters are not buttons")
 	}
 	if v, _ := broker.get("homeassistant/button/dreame_123/turn_left/config"); !strings.Contains(v, `"payload_press":"turn_left"`) {
 		t.Fatal("remote control button", v)
@@ -401,6 +413,23 @@ func TestBridge(t *testing.T) {
 		waitFor(t, want, func() bool { return agent.last() == want })
 	}
 
+	// What the agent stops offering disappears from Home Assistant.
+	agent.mu.Lock()
+	agent.caps = strings.Replace(agent.caps, `"wash_mop":{"available":true`, `"wash_mop":{"available":false`, 1)
+	agent.settings = strings.Replace(agent.settings, `{"id":"child_lock","label":"Блокировка от детей","kind":"bool","value":0},`, "", 1)
+	agent.mu.Unlock()
+	for _, topic := range []string{"homeassistant/button/dreame_123/wash_mop/config", "homeassistant/switch/dreame_123/setting_child_lock/config"} {
+		waitFor(t, "removed "+topic, func() bool { v, ok := broker.get(topic); return ok && v == "" })
+	}
+	if v, _ := broker.get("homeassistant/button/dreame_123/empty/config"); v == "" {
+		t.Fatal("kept entities stay")
+	}
+	broker.send("dreame_local/123/command", "wash_mop")
+	time.Sleep(300 * time.Millisecond)
+	if agent.last() == `{"name":"wash_mop"}` {
+		t.Fatal("a removed button must not reach the agent")
+	}
+
 	// A settings change reconnects with the new credentials.
 	configure(`{"enabled":true,"host":"127.0.0.1","port":` + fmt.Sprint(port) + `,"username":"ha","keep_password":true,"base_topic":"robot"}`)
 	waitFor(t, "reconnect", func() bool { broker.mu.Lock(); defer broker.mu.Unlock(); return len(broker.connects) == 2 })
@@ -470,15 +499,15 @@ func TestVacuumAttributes(t *testing.T) {
 func TestNoCameraWithoutCameraModule(t *testing.T) {
 	d := discovery(topicsFor(config{}, "1"), capabilities{}, "x", nil, nil, false, true)
 	for _, topic := range []string{"homeassistant/camera/dreame_1/front/config", "homeassistant/switch/dreame_1/camera_live/config", "homeassistant/switch/dreame_1/camera_light/config", "homeassistant/button/dreame_1/move_forward/config"} {
-		if v, ok := d[topic]; !ok || v != "" {
-			t.Errorf("%s must be cleared, got %q", topic, v)
+		if v := d[topic]; v != "" {
+			t.Errorf("%s must not be announced, got %q", topic, v)
 		}
 	}
 }
 
 func TestSettingNamesAndHidden(t *testing.T) {
 	common := func(m map[string]any) string { b, _ := json.Marshal(m); return string(b) }
-	d := settingDiscovery(topicsFor(config{}, "1"), common, []setting{{ID: "lds_state", Label: "LDS", Kind: "bool"}, {ID: "fill_light", Label: "Подсветка камеры", Kind: "bool"}})
+	d := settingDiscovery(topicsFor(config{}, "1"), common, []setting{{ID: "lds_state", Label: "LDS", Kind: "bool", Advanced: true}, {ID: "fill_light", Label: "Подсветка в темноте (для ИИ)", Kind: "bool"}})
 	if v := d["homeassistant/switch/dreame_1/setting_lds_state/config"]; !strings.Contains(v, `"enabled_by_default":false`) {
 		t.Fatal("service setting must start disabled", v)
 	}

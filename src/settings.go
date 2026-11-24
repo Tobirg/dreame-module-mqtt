@@ -11,11 +11,14 @@ import (
 // setting is one entry of the agent's GET /api/v1/settings (agent 0.22+): the panel's catalog
 // entries this robot has, with their current value.
 type setting struct {
-	ID      string `json:"id"`
-	Label   string `json:"label"`
-	Kind    string `json:"kind"` // bool, select, number
-	Auto    string `json:"auto"`
-	Options []struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Kind  string `json:"kind"` // bool, select, number
+	// Service and cloud-only settings (agent 0.41+): announced, but disabled until enabled in Home Assistant
+	// (applies when Home Assistant first creates the entity).
+	Advanced bool   `json:"advanced"`
+	Auto     string `json:"auto"`
+	Options  []struct {
 		Value any    `json:"value"`
 		Label string `json:"label"`
 	} `json:"options"`
@@ -27,14 +30,6 @@ type setting struct {
 
 var settingIDRe = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
-// Service and cloud-only settings: announced, but disabled until enabled in Home Assistant
-// (applies when Home Assistant first creates the entity).
-var hiddenSettings = map[string]bool{"lds_state": true, "auto_lds_coverage": true, "streaming_voice_prompt": true, "voice_assistant_language": true,
-	"human_follow": true, "ai_bit_ai_obstacle_image_upload": true, "ai_json_ai_obstacle_image_upload": true}
-
-// Clearer names than the catalog's where two entities would read alike.
-var settingNames = map[string]string{"fill_light": "Подсветка в темноте (для ИИ)"}
-
 // settingDiscovery announces each setting as a switch, select or number under the device.
 func settingDiscovery(t topics, common func(map[string]any) string, list []setting) map[string]string {
 	out := map[string]string{}
@@ -42,14 +37,10 @@ func settingDiscovery(t topics, common func(map[string]any) string, list []setti
 		if !settingIDRe.MatchString(s.ID) {
 			continue
 		}
-		name := s.Label
-		if n, ok := settingNames[s.ID]; ok {
-			name = n
-		}
-		m := map[string]any{"name": name, "unique_id": t.node + "_setting_" + s.ID, "entity_category": "config",
+		m := map[string]any{"name": s.Label, "unique_id": t.node + "_setting_" + s.ID, "entity_category": "config",
 			"state_topic": t.base + "/settings", "value_template": "{{ value_json." + s.ID + " }}",
 			"command_topic": t.base + "/setting/" + s.ID + "/set"}
-		if hiddenSettings[s.ID] {
+		if s.Advanced {
 			m["enabled_by_default"] = false
 		}
 		component := "switch"

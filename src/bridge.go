@@ -248,14 +248,6 @@ var sensors = []struct {
 // Station work (4/25) as seen on r2505; other codes show as "code N".
 var stationNames = map[float64]string{0: "idle", 1: "washing", 2: "drying", 5: "washing"}
 
-// Station buttons are announced only when the agent says the model has the hardware.
-var buttons = []struct{ command, name, icon string }{
-	{"empty", "Empty dustbin", "mdi:delete-empty"},
-	{"wash_mop", "Wash mop", "mdi:water"},
-	{"dry_start", "Start mop drying", "mdi:fan"},
-	{"dry_stop", "Stop mop drying", "mdi:fan-off"},
-}
-
 type capabilities struct {
 	Identity map[string]string `json:"identity"`
 	Agent    struct {
@@ -263,7 +255,24 @@ type capabilities struct {
 	} `json:"agent"`
 	Commands map[string]struct {
 		Available bool `json:"available"`
+		// One-press commands (agent 0.41+): station jobs and the like, with the agent's name and icon.
+		Button *struct {
+			Label string `json:"label"`
+			Icon  string `json:"icon"`
+		} `json:"button"`
 	} `json:"commands"`
+}
+
+// buttons lists the agent's one-press commands this robot has, sorted, as discovery and commands need them.
+func (c capabilities) buttons() []string {
+	names := []string{}
+	for name, cmd := range c.Commands {
+		if cmd.Button != nil && cmd.Available && consumableRe.MatchString(name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 type topics struct{ base, discovery, node string }
@@ -368,20 +377,17 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 	for topic, payload := range settingDiscovery(t, common, settings) {
 		out[topic] = payload
 	}
-	for _, b := range buttons {
-		topic := t.discovery + "/button/" + t.node + "/" + b.command + "/config"
-		out[topic] = ""
-		if caps.Commands[b.command].Available {
-			out[topic] = common(map[string]any{"name": b.name, "unique_id": t.node + "_" + b.command, "command_topic": t.base + "/command",
-				"payload_press": b.command, "icon": b.icon})
-		}
+	// Only what the agent offers now: the session clears entities that were announced before and are gone.
+	for _, name := range caps.buttons() {
+		b := caps.Commands[name].Button
+		out[t.discovery+"/button/"+t.node+"/"+name+"/config"] = common(map[string]any{"name": b.Label, "unique_id": t.node + "_" + name,
+			"command_topic": t.base + "/command", "payload_press": name, "icon": b.Icon})
 	}
-	for _, m := range moves {
-		topic := t.discovery + "/button/" + t.node + "/" + m.command + "/config"
-		out[topic] = ""
+	for _, m := range moves { // the module's own entities: cleared at once when not offered
+		out[t.discovery+"/button/"+t.node+"/"+m.command+"/config"] = ""
 		if caps.Commands["remote_move"].Available {
-			out[topic] = common(map[string]any{"name": m.name, "unique_id": t.node + "_" + m.command, "command_topic": t.base + "/command",
-				"payload_press": m.command, "icon": m.icon})
+			out[t.discovery+"/button/"+t.node+"/"+m.command+"/config"] = common(map[string]any{"name": m.name, "unique_id": t.node + "_" + m.command,
+				"command_topic": t.base + "/command", "payload_press": m.command, "icon": m.icon})
 		}
 	}
 	cam, live, lamp := t.discovery+"/camera/"+t.node+"/front/config", t.discovery+"/switch/"+t.node+"/camera_live/config", t.discovery+"/switch/"+t.node+"/camera_light/config"
@@ -457,13 +463,13 @@ func consumableNames(s map[string]any) []string {
 }
 
 // commandFor maps an MQTT message to an agent command.
-func commandFor(t topics, msg message, suction int) (map[string]any, error) {
+func commandFor(t topics, msg message, suction int, caps capabilities) (map[string]any, error) {
 	payload := strings.TrimSpace(msg.Payload)
 	switch msg.Topic {
 	case t.base + "/command":
 		names := map[string]string{"start": "start", "pause": "pause", "stop": "stop", "return_to_base": "dock", "locate": "locate"}
-		for _, b := range buttons {
-			names[b.command] = b.command
+		for _, b := range caps.buttons() {
+			names[b] = b
 		}
 		if name, ok := names[payload]; ok {
 			return map[string]any{"name": name}, nil
@@ -668,13 +674,33 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		lastAttributes = a
 		return client.Publish(t.base+"/attributes", a, true)
 	}
+	// Entities announced earlier, also by an earlier run: whatever the agent no longer offers is removed
+	// from Home Assistant, but only once the state and settings are known, so nothing blinks out at start.
+	announcedFile := filepath.Join(e.data, "announced.json")
+	published := map[string]bool{}
+	if b, err := os.ReadFile(announcedFile); err == nil {
+		_ = json.Unmarshal(b, &published)
+	}
+	settingsKnown := false
 	announce := func() error {
-		for topic, payload := range discovery(t, caps, version, names, settings, camera, cam.Light != nil) {
+		next := discovery(t, caps, version, names, settings, camera, cam.Light != nil)
+		complete := state != nil && settingsKnown
+		for topic := range published {
+			if _, ok := next[topic]; !ok && complete {
+				next[topic] = ""
+			}
+		}
+		for topic, payload := range next {
 			if err := client.Publish(topic, payload, true); err != nil {
 				return err
 			}
+			if payload == "" {
+				delete(published, topic)
+			} else {
+				published[topic] = true
+			}
 		}
-		return nil
+		return writeJSON(announcedFile, published)
 	}
 	// Finished runs from the agent's history, published as events; the newest run at connect is only remembered.
 	lastRun, historyRead := "", false
@@ -740,8 +766,15 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 		if err := e.get(rctx, "/api/v1/settings", &list); err != nil {
 			return nil
 		}
-		settings = list
-		ids := []string{}
+		settings, settingsKnown = list, true
+		var fresh capabilities // the agent's commands change with an update or a module
+		if e.get(rctx, "/api/v1/capabilities", &fresh) == nil && fresh.Identity["did"] == did {
+			caps = fresh
+		}
+		ids := caps.buttons()
+		if caps.Commands["remote_move"].Available {
+			ids = append(ids, "+remote")
+		}
 		if camera = hasCamera(); camera {
 			ids = append(ids, "+camera") // installing or removing the camera module re-announces
 			if cam.Light != nil {
@@ -835,7 +868,9 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				err = publishAvailability("offline")
 			} else {
 				// Consumables are known only from the state; announce them once they appear.
-				if names = consumableNames(s.State); strings.Join(names, ",") != announced {
+				first := state == nil
+				state = s.State
+				if names = consumableNames(s.State); strings.Join(names, ",") != announced || first {
 					announced = strings.Join(names, ",")
 					if err = announce(); err != nil {
 						return err
@@ -844,7 +879,6 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				if v, ok := s.State["suction"].(float64); ok && v >= 0 && v <= 3 {
 					suction = int(v)
 				}
-				state = s.State
 				if err = client.Publish(t.base+"/state", statePayload(s.State, segments), true); err == nil {
 					err = publishAttributes()
 				}
@@ -877,7 +911,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 				}
 				continue
 			}
-			cmd, err := commandFor(t, msg, suction)
+			cmd, err := commandFor(t, msg, suction, caps)
 			if w, ok := strings.CutPrefix(msg.Topic, t.base+"/dnd_"); ok && (w == "start/set" || w == "end/set") {
 				cmd, err = dndCommand(state, strings.TrimSuffix(w, "/set"), msg.Payload)
 			}
