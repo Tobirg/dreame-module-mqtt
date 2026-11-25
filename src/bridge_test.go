@@ -207,8 +207,8 @@ func newAgent(t *testing.T) *fakeAgent {
 			a.mu.Lock()
 			fmt.Fprintf(w, `{"result":%s}`, a.history)
 			a.mu.Unlock()
-		case "/api/v1/map.png":
-			w.Header().Set("Content-Type", "image/png")
+		case "/api/v1/map.svg":
+			w.Header().Set("Content-Type", "image/svg+xml")
 			fmt.Fprint(w, "\x89PNG-test")
 		case "/api/v1/command":
 			var v map[string]any

@@ -325,7 +325,7 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 			"entity_category": "diagnostic", "icon": "mdi:alert-circle-outline",
 		}),
 		t.discovery + "/image/" + t.node + "/map/config": common(map[string]any{
-			"name": "Map", "unique_id": t.node + "_map", "image_topic": t.base + "/map", "content_type": "image/png",
+			"name": "Map", "unique_id": t.node + "_map", "image_topic": t.base + "/map", "content_type": "image/svg+xml",
 			// calibration_points and rooms for map cards such as xiaomi-vacuum-map-card
 			"json_attributes_topic": t.base + "/map_attributes",
 		}),
@@ -823,7 +823,7 @@ func (e env) session(ctx context.Context, c config, mtime time.Time, version str
 	publishMap := func() error {
 		mctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		img, err := e.raw(mctx, "/api/v1/map.png")
+		img, err := e.raw(mctx, "/api/v1/map.svg")
 		if err != nil || string(img) == lastMap {
 			return nil // no saved map yet, or unchanged
 		}

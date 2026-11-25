@@ -89,7 +89,7 @@ params: {setting: child_lock, to: true}
 - `<база>/send_command` — `{"command": "...", "params": {...}}` или параметры на верхнем уровне, как их шлёт Home Assistant; для `clean_zone`, `clean_spot`, `clean_rooms` недостающие `repeats`, `suction`, `water` — 1, текущая мощность, 2;
 - `<база>/settings` — JSON настроек (`ON`/`OFF`, подпись варианта или число), retained;
 - `<база>/setting/<id>/set` — новое значение настройки в том же виде;
-- `<база>/map`, `<база>/map_attributes` — картинка карты и её калибровка с комнатами, retained;
+- `<база>/map`, `<база>/map_attributes` — карта (SVG, без потери качества при увеличении) и её калибровка с комнатами, retained;
 - `<база>/camera_live/set` — `ON`/`OFF`, `<база>/camera_live` — состояние, retained; `<база>/camera` — кадр JPEG в base64, не retained; `<база>/camera_status` — `{"state", "reason"}`, retained;
 - `<база>/camera_light/set` — `ON`/`OFF`, `<база>/camera_light` — состояние подсветки, retained.
 
