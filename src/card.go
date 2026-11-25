@@ -39,7 +39,7 @@ entity: vacuum.%s
 # entities to match it, so new ones appear without changing this text. Map modes are below.
 vacuum_platform: Tasshack/dreame-vacuum
 map_source:
-  camera: camera.%s_map_camera
+  camera: image.%s_map
 calibration_source:
   camera: true
 map_modes:

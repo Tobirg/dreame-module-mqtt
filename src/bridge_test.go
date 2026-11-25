@@ -259,8 +259,8 @@ func TestBridge(t *testing.T) {
 	if v, _ := broker.get("homeassistant/image/dreame_123/map/config"); !strings.Contains(v, `"json_attributes_topic":"dreame_local/123/map_attributes"`) {
 		t.Fatal("map attributes topic", v)
 	}
-	if v, _ := broker.get("homeassistant/camera/dreame_123/map/config"); !strings.Contains(v, `"topic":"dreame_local/123/map"`) {
-		t.Fatal("map camera", v)
+	if v, ok := broker.get("homeassistant/camera/dreame_123/map/config"); ok && v != "" {
+		t.Fatal("the map camera is gone, the image entity replaces it", v)
 	}
 	if v, _ := broker.get("dreame_local/123/map_attributes"); !strings.Contains(v, `"calibration_points":[{"map":{"x":6,"y":-3},"vacuum":{"x":0,"y":0}}]`) {
 		t.Fatal("map attributes", v)
@@ -472,7 +472,7 @@ func TestCardYAML(t *testing.T) {
 		"4":  map[string]any{"name": `Комната "4"`, "x": -5, "y": 6, "outline": [][2]int{}},
 	}}
 	y := cardYAML("dreame.vacuum.r2505", card)
-	for _, want := range []string{"entity: vacuum.dreame_r2505\n", "camera: camera.dreame_r2505_map_camera\n", "command: clean_zone",
+	for _, want := range []string{"entity: vacuum.dreame_r2505\n", "camera: image.dreame_r2505_map\n", "command: clean_zone",
 		`params: {points: [["[[point_x]]", "[[point_y]]"]], repeats: "[[repeats]]"}`,
 		"      - id: \"4\"\n        label: {text: \"Комната \\\"4\\\"\", x: -5, 'y': 6}\n        outline: []\n      - id: \"10\"",
 		"outline: [[0,0],[100,0],[100,100]]"} {

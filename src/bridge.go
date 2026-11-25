@@ -329,11 +329,6 @@ func discovery(t topics, caps capabilities, version string, parts []string, sett
 			// calibration_points and rooms for map cards such as xiaomi-vacuum-map-card
 			"json_attributes_topic": t.base + "/map_attributes",
 		}),
-		// The same picture as a camera: map cards take their map from a camera entity.
-		t.discovery + "/camera/" + t.node + "/map/config": common(map[string]any{
-			"name": "Map camera", "unique_id": t.node + "_map_camera", "topic": t.base + "/map",
-			"json_attributes_topic": t.base + "/map_attributes",
-		}),
 	}
 	for _, s := range sensors {
 		m := map[string]any{"name": s.name, "unique_id": t.node + "_" + s.id, "state_topic": t.base + "/state", "value_template": "{{ value_json." + s.field + " }}"}
